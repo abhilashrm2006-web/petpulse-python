@@ -328,6 +328,85 @@ async def test_file_prescription_falls_back_to_plain_layout_when_formatting_fail
 
 
 @pytest.mark.asyncio
+async def test_file_prescription_also_sends_a_pdf_copy(monkeypatch):
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "completed",
+                    "case_summary": "Coughing for 2 days",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    ctx.whatsapp.send_document = AsyncMock()
+    monkeypatch.setattr("app.agent.tools.booking.upload_to_storage", lambda *a, **k: None)
+    monkeypatch.setattr("app.agent.tools.booking.sign_storage_url", lambda *a, **k: "https://signed.example/prescription.pdf")
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await file_prescription(
+        ctx, agent_ctx, session_id="session-a", medications="Amoxicillin 250mg twice daily", treatment_plan="Rest for 5 days"
+    )
+
+    assert result["success"] is True
+    ctx.whatsapp.send_document.assert_awaited_once_with(
+        "919876543210", "https://signed.example/prescription.pdf", "Max_prescription.pdf", "Prescription for Max from Dr. Rao"
+    )
+    doc = supabase.rows("documents")[0]
+    assert doc["document_type"] == "Prescription"
+    assert doc["pet_id"] == "pet-a"
+
+
+@pytest.mark.asyncio
+async def test_file_prescription_succeeds_even_if_pdf_generation_fails(monkeypatch):
+    """The PDF is a best-effort extra on top of the text summary already
+    sent — a storage/rendering failure must never fail the tool call or
+    stop the vet from getting confirmation it went through."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "completed",
+                    "case_summary": "Coughing for 2 days",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    monkeypatch.setattr(
+        "app.agent.tools.booking.upload_to_storage",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("storage down")),
+    )
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await file_prescription(
+        ctx, agent_ctx, session_id="session-a", medications="Amoxicillin 250mg twice daily", treatment_plan="Rest for 5 days"
+    )
+
+    assert result["success"] is True
+    ctx.whatsapp.send_text.assert_awaited_once()  # the text summary still went out
+
+
+@pytest.mark.asyncio
 async def test_rescheduling_a_confirmed_session_updates_the_existing_calendar_event(monkeypatch):
     """A session with a calendar_event_id already set means a real Meet-linked
     event already exists (confirmed booking, not just a pending request) —

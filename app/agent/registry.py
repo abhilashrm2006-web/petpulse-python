@@ -241,7 +241,7 @@ TOOL_SPECS: list[ToolSpec] = [
         "file_prescription",
         "File the vet's prescription/treatment notes for a completed session. Automatically reformats the "
         "vet's own words into a clean prescription layout (never inventing or altering the actual medications/ "
-        "doses/instructions) and sends that to the customer.",
+        "doses/instructions) and sends that plus a downloadable PDF copy to the customer.",
         {"session_id": _STR, "medications": _STR, "treatment_plan": _STR},
         ["session_id", "medications"],
         booking.file_prescription,

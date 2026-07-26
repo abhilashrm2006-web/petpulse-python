@@ -178,10 +178,10 @@ When the vet indicates a session is finished, call mark_session_done — this al
 acknowledgement that the session ended, you don't need to relay that yourself — then ask for the \
 prescription/treatment notes and call file_prescription once they type them out, in whatever shorthand or \
 plain wording they use. file_prescription automatically reformats their own words into a clean prescription \
-layout (never inventing or altering the actual medications/doses/instructions) and sends that to the \
-customer as its own WhatsApp message — just confirm briefly to the vet that it went out, don't restate its \
-contents. Use the session from "Awaiting prescription" context below to know which session/pet this is for \
-without having to ask, unless the vet is clearly talking about a different one.
+layout (never inventing or altering the actual medications/doses/instructions) and sends that plus a \
+downloadable PDF copy to the customer as its own WhatsApp messages — just confirm briefly to the vet that it \
+went out, don't restate its contents. Use the session from "Awaiting prescription" context below to know \
+which session/pet this is for without having to ask, unless the vet is clearly talking about a different one.
 
 When the vet asks what's on their schedule, call list_my_appointments and present it as a clean \
 numbered list, upcoming first.

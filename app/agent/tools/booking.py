@@ -23,7 +23,8 @@ from app.deps import AppContext
 from app.ingestion.context import AgentContext
 from app.integrations import google_calendar, razorpay_client
 from app.integrations.openai_client import text_completion
-from app.integrations.supabase_client import get_pet_member_contacts
+from app.integrations.prescription_pdf import build_prescription_pdf
+from app.integrations.supabase_client import get_pet_member_contacts, sign_storage_url, upload_to_storage
 from app.utils.pet_resolution import AMBIGUOUS_PET, resolve_pet
 
 logger = logging.getLogger(__name__)
@@ -736,13 +737,61 @@ async def file_prescription(
 
     message = await _format_prescription_message(ctx, pet_name, doctor_name, session.get("case_summary", ""), medications, treatment_plan)
     await _notify_household(ctx, session, message)
+    await _send_prescription_pdf(ctx, session, pet_name, doctor_name, medications, treatment_plan)
 
     return {
         "success": True,
         "mode": "prescription_filed",
         "session_id": session_id,
-        "instruction_to_llm": "The formatted prescription was already sent to the customer as a WhatsApp message — just confirm briefly to the vet, don't restate its contents.",
+        "instruction_to_llm": "The formatted prescription and a PDF copy were already sent to the customer as "
+        "WhatsApp messages — just confirm briefly to the vet, don't restate its contents.",
     }
+
+
+async def _send_prescription_pdf(
+    ctx: AppContext, session: dict[str, Any], pet_name: str, doctor_name: str, medications: str, treatment_plan: str
+) -> None:
+    """Best-effort, on top of the text summary that's already gone out and
+    is the guaranteed record: renders a PDF copy, files it the same way any
+    other document is (so it also shows up via get_pet_passport later), and
+    sends it as a WhatsApp attachment. A failure anywhere here (rendering,
+    storage, or the send itself) must never undo the text summary already
+    sent or fail the whole tool call — log and move on."""
+    client = ctx.supabase
+    try:
+        pdf_bytes = build_prescription_pdf(
+            pet_name=pet_name,
+            doctor_name=doctor_name,
+            date_str=datetime.now(tz=IST).strftime("%d %b %Y"),
+            reason=session.get("case_summary", ""),
+            medications=medications,
+            treatment_plan=treatment_plan,
+        )
+        object_path = f"{session.get('pet_id') or 'unassigned'}/{int(datetime.now(tz=IST).timestamp())}-prescription.pdf"
+        upload_to_storage(client, "medical-documents", object_path, pdf_bytes, "application/pdf")
+        signed_url = sign_storage_url(client, "medical-documents", object_path)
+
+        client.table("documents").insert(
+            {
+                "pet_id": session.get("pet_id"),
+                "profile_id": session["profile_id"],
+                "document_name": f"Prescription - {pet_name}",
+                "document_type": "Prescription",
+                "storage_path": f"medical-documents/{object_path}",
+                "mime_type": "application/pdf",
+                "is_verified": True,
+            }
+        ).execute()
+
+        for phone in _household_phones(client, session):
+            try:
+                await ctx.whatsapp.send_document(
+                    phone, signed_url, f"{pet_name}_prescription.pdf", f"Prescription for {pet_name} from {doctor_name}"
+                )
+            except Exception:
+                logger.exception("Failed to send prescription PDF to %s for session %s", phone, session.get("id"))
+    except Exception:
+        logger.exception("Failed to generate/file prescription PDF for session %s", session.get("id"))
 
 
 async def list_my_appointments(ctx: AppContext, agent_ctx: AgentContext) -> dict[str, Any]:

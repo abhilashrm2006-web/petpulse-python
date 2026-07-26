@@ -7,6 +7,7 @@ supabase==2.11.0
 openai==1.59.6
 apscheduler==3.11.0
 pymupdf==1.25.2
+fpdf2==2.8.2
 python-dotenv==1.0.1
 python-dateutil==2.9.0.post0
 
