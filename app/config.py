@@ -15,7 +15,10 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str = ""
-    openai_agent_model: str = "gpt-5.4-mini"
+    # Full gpt-5.4, not the -mini tier -- the "24/7 AI Health Copilot" is meant to
+    # genuinely be a ChatGPT-caliber conversational assistant for pet questions, not
+    # just imitate one on a cheaper/smaller model.
+    openai_agent_model: str = "gpt-5.4"
     openai_reasoning_model: str = "gpt-5.4"
     openai_audio_model: str = "gpt-audio"
     openai_agent_max_tokens: int = 5600
