@@ -61,7 +61,12 @@ def _apply_safety_override(symptoms_text: str, verdict: dict[str, Any]) -> dict[
         verdict["severity"] = 5
         verdict["severity_label"] = "Emergency"
         verdict["requires_emergency_care"] = True
-        verdict.setdefault("red_flags", [])
+        # setdefault only fills in a MISSING key -- an LLM emitting a
+        # present-but-null "red_flags" (valid JSON, plausible when it has
+        # nothing to report) leaves it None, and .append() on None would
+        # crash exactly on the poisoning/ingestion path this override exists
+        # to catch.
+        verdict["red_flags"] = verdict.get("red_flags") or []
         if poisoning_escalation:
             verdict["red_flags"].append(f"possible ingestion of harmful substance: {substance_hit}")
     return verdict

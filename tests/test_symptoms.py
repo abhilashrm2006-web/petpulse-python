@@ -51,3 +51,16 @@ def test_no_red_flags_leaves_verdict_untouched():
     result = _apply_safety_override("slightly less energetic than usual today", verdict)
     assert result["severity"] == 2
     assert result["requires_emergency_care"] is False
+
+
+def test_poisoning_intersection_escalates_even_when_llm_sent_explicit_null_red_flags():
+    """Audit bug: verdict.setdefault("red_flags", []) only fills in a
+    MISSING key -- an LLM emitting a present-but-null "red_flags" (valid
+    JSON, plausible when it has nothing to report on its own) left it None,
+    and .append() on None crashed exactly on this poisoning/ingestion path,
+    the one case this override exists to protect."""
+    verdict = {"severity": 1, "severity_label": "Mild", "requires_emergency_care": False, "red_flags": None}
+    result = _apply_safety_override("my dog ate a whole bar of chocolate an hour ago", verdict)
+    assert result["severity"] == 5
+    assert result["requires_emergency_care"] is True
+    assert any("chocolate" in flag for flag in result["red_flags"])
