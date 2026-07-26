@@ -343,11 +343,16 @@ async def handle_payment_webhook(ctx: AppContext, event_body: dict[str, Any]) ->
     customer answers that, via respond_to_recording_consent."""
     session_id = razorpay_client.extract_paid_session_id(event_body)
     if not session_id:
+        logger.info("Razorpay webhook event=%s ignored: not a payment_link.paid event, or missing reference_id", event_body.get("event"))
         return False
 
     client = ctx.supabase
     session = _get_session(client, session_id)
-    if not session or session.get("payment_status") == "paid":
+    if not session:
+        logger.error("Razorpay webhook: paid session_id=%s has no matching doctor_sessions row", session_id)
+        return False
+    if session.get("payment_status") == "paid":
+        logger.info("Razorpay webhook: session_id=%s already marked paid, ignoring duplicate delivery", session_id)
         return False
 
     client.table("doctor_sessions").update(

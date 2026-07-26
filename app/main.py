@@ -130,11 +130,15 @@ async def receive_razorpay_webhook(request: Request) -> Response:
     raw_body = await request.body()
 
     if not razorpay_client.verify_webhook_signature(ctx.settings, raw_body, request.headers.get("x-razorpay-signature")):
+        logger.warning("Rejected Razorpay webhook: signature verification failed")
         return Response(status_code=403)
 
     body = await request.json()
+    logger.info("Received Razorpay webhook event=%s", body.get("event"))
     try:
-        await handle_payment_webhook(ctx, body)
+        handled = await handle_payment_webhook(ctx, body)
+        if not handled:
+            logger.warning("Razorpay webhook event=%s was not acted on (see handle_payment_webhook logs for why)", body.get("event"))
     except Exception:
         logger.exception("Failed to process Razorpay webhook event")
 
