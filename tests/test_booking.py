@@ -722,6 +722,95 @@ async def test_finalize_booking_sends_a_detailed_assignment_notice_to_the_doctor
 
 
 @pytest.mark.asyncio
+async def test_notify_household_continues_past_one_members_send_failure():
+    """Real bug found via live data: one household member's WhatsApp send
+    failing (expired 24h messaging window, invalid number, rate limit) used
+    to raise out of the loop and skip every member queued after it."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "accepted"}
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "profile-2", "phone_number": "919111111111", "full_name": "John"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+            "pet_members": [
+                {"pet_id": "pet-a", "profile_id": "profile-1", "role": "owner"},
+                {"pet_id": "pet-a", "profile_id": "profile-2", "role": "family"},
+            ],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    async def flaky_send(phone, message):
+        if phone == "919876543210":
+            raise RuntimeError("WhatsApp send failed")
+
+    ctx.whatsapp.send_text = AsyncMock(side_effect=flaky_send)
+
+    from app.agent.tools.booking import _notify_household
+
+    session = supabase.rows("doctor_sessions")[0]
+    await _notify_household(ctx, session, "Your session is confirmed.")
+
+    notified_phones = {c.args[0] for c in ctx.whatsapp.send_text.call_args_list}
+    assert notified_phones == {"919876543210", "919111111111"}
+
+
+@pytest.mark.asyncio
+async def test_finalize_booking_still_notifies_doctor_when_household_notification_fails(monkeypatch):
+    """Real bug found via live data: a WhatsApp delivery failure to the
+    customer/household used to raise out of _finalize_booking before it ever
+    reached the doctor-notification line right after it — so the vet
+    silently never heard about a session that was, in fact, booked (calendar
+    event + DB row already committed by that point)."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "pending_doctor_choice",
+                    "status": "pending",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    async def flaky_send(phone, message):
+        if phone == "919876543210":
+            raise RuntimeError("WhatsApp 24h window expired")
+
+    ctx.whatsapp.send_text = AsyncMock(side_effect=flaky_send)
+    monkeypatch.setattr(
+        "app.agent.tools.booking.google_calendar.create_event_with_meet",
+        AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"}),
+    )
+
+    from app.agent.tools.booking import _finalize_booking
+    from datetime import datetime as dt
+
+    session = supabase.rows("doctor_sessions")[0]
+    start = dt.fromisoformat("2026-07-28T14:00:00+05:30")
+    end = dt.fromisoformat("2026-07-28T14:30:00+05:30")
+
+    result = await _finalize_booking(ctx, session, "919000000001", start, end)
+
+    assert result["success"] is True
+    doctor_call = next(c for c in ctx.whatsapp.send_text.call_args_list if c.args[0] == "919000000001")
+    assert "New session assigned to you" in doctor_call.args[1]
+
+
+@pytest.mark.asyncio
 async def test_reschedule_confirmation_notifies_doctor_with_rescheduled_header(monkeypatch):
     supabase = FakeSupabaseClient(
         initial={

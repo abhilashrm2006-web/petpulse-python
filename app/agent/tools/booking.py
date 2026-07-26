@@ -66,7 +66,14 @@ async def _notify_household(ctx: AppContext, session: dict[str, Any], message: s
         if profile:
             phones = {profile["phone_number"]}
     for phone in phones:
-        await ctx.whatsapp.send_text(phone, message)
+        try:
+            await ctx.whatsapp.send_text(phone, message)
+        except Exception:
+            # One member's send failing (expired 24h WhatsApp window, invalid
+            # number, rate limit) must never take the rest of the household —
+            # or, via _finalize_booking calling this before the doctor
+            # notification, the vet — down with it.
+            logger.exception("Failed to notify household member %s for session %s", phone, session.get("id"))
 
 
 def _pet_description(pet: dict[str, Any] | None, fallback: str = "the pet") -> str:
@@ -453,9 +460,15 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
         + (f"\nJoin here: {meet_link}" if meet_link else ""),
     )
     doctor_header = "🔄 *Session rescheduled*" if is_reschedule else "📋 *New session assigned to you*"
-    await ctx.whatsapp.send_text(
-        doctor_phone, _format_doctor_message(client, session, doctor_header, when_text=when_text, meet_link=meet_link)
-    )
+    try:
+        await ctx.whatsapp.send_text(
+            doctor_phone, _format_doctor_message(client, session, doctor_header, when_text=when_text, meet_link=meet_link)
+        )
+    except Exception:
+        # Calendar event + DB row are already committed by this point — a
+        # delivery failure to the doctor is a notification problem, not a
+        # reason to report the booking itself as failed.
+        logger.exception("Failed to notify doctor %s for session %s", doctor_phone, session["id"])
 
     return {
         "success": True,
