@@ -418,7 +418,7 @@ async def test_prescription_pdf_uses_the_treating_vets_own_profile_fields(monkey
     assert result["success"] is True
     assert captured["doctor_qualification"] == "BVSc & AH, MVSc (Surgery)"
     assert captured["doctor_registration_number"] == "TNVC-2024-00123"
-    assert captured["doctor_phone"] == "919000000001"
+    assert "doctor_phone" not in captured
 
 
 @pytest.mark.asyncio

@@ -777,7 +777,6 @@ async def _send_prescription_pdf(
             doctor_name=doctor_name,
             doctor_qualification=doctor_profile.get("qualification") or "",
             doctor_registration_number=doctor_profile.get("registration_number") or "",
-            doctor_phone=doctor_profile.get("phone_number") or session.get("doctor_phone") or "",
             date_str=datetime.now(tz=IST).strftime("%d %b %Y"),
             reason=session.get("case_summary", ""),
             medications=medications,

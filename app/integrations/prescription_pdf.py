@@ -7,8 +7,8 @@ already-formatted message, never regenerated or altered here.
 
 The clinic block (logo, address, phone, email) is fixed -- Waggy World's
 own letterhead identity. The doctor block (name, qualification, registration
-number, contact) is per-consultation, sourced from the treating vet's own
-profile row."""
+number) is per-consultation, sourced from the treating vet's own profile
+row."""
 
 import os
 
@@ -18,9 +18,9 @@ PAGE_MARGIN_MM = 18
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "waggy_world_logo.png")
 
 CLINIC_NAME = "Waggy World"
-CLINIC_ADDRESS = "Plot No. 13, Beside Agarwal Homes, Balaji Nagar 3rd Extension, Puzhuthivakkam, Chennai - 600091, Tamil Nadu"
+CLINIC_ADDRESS = "Puzhuthivakkam, Chennai, Tamil Nadu - 600091"
 CLINIC_PHONE = "+91 9513808305"
-CLINIC_EMAIL = "abhilash@WaggyWorld1993.onmicrosoft.com"
+CLINIC_EMAIL = "support@WaggyWorld1993.onmicrosoft.com"
 
 # fpdf2's core fonts (Helvetica etc.) only support latin-1 -- embedding a
 # full Unicode TTF just for this would mean bundling a font file. Since this
@@ -51,7 +51,6 @@ def build_prescription_pdf(
     doctor_name: str,
     doctor_qualification: str = "",
     doctor_registration_number: str = "",
-    doctor_phone: str = "",
     date_str: str,
     reason: str,
     medications: str,
@@ -94,8 +93,6 @@ def build_prescription_pdf(
     if doctor_qualification:
         pdf.cell(0, 5.5, _pdf_safe(doctor_qualification), new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 5.5, _pdf_safe(f"Registration No: {doctor_registration_number or 'Not on file'}"), new_x="LMARGIN", new_y="NEXT")
-    if doctor_phone:
-        pdf.cell(0, 5.5, _pdf_safe(f"Contact: {doctor_phone}"), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
     # --- patient / date ---
@@ -123,7 +120,23 @@ def build_prescription_pdf(
         pdf.set_font("Helvetica", "", 11)
         pdf.multi_cell(0, 6.5, _pdf_safe(treatment_plan))
 
-    pdf.ln(12)
+    # --- signature block, right-aligned above the footer disclaimer ---
+    pdf.ln(18)
+    sig_w = 70
+    sig_x = page_w - PAGE_MARGIN_MM - sig_w
+    pdf.set_draw_color(120, 120, 120)
+    pdf.line(sig_x, pdf.get_y(), sig_x + sig_w, pdf.get_y())
+    pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_text_color(20, 20, 20)
+    pdf.set_x(sig_x)
+    pdf.cell(sig_w, 5, _pdf_safe(f"Dr. {doctor_name}" if not doctor_name.lower().startswith("dr") else doctor_name), align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 8.5)
+    pdf.set_text_color(90, 90, 90)
+    pdf.set_x(sig_x)
+    pdf.cell(sig_w, 4.5, "Signature", align="C", new_x="LMARGIN", new_y="NEXT")
+
+    pdf.ln(8)
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(120, 120, 120)
     pdf.multi_cell(0, 5, "Generated via PetPulse. This document reflects the veterinarian's own notes from the consultation.")
