@@ -724,6 +724,13 @@ async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id
 async def file_prescription(
     ctx: AppContext, agent_ctx: AgentContext, session_id: str, medications: str, treatment_plan: str = ""
 ) -> dict[str, Any]:
+    """Files the vet's prescription/treatment notes, but does NOT deliver
+    them yet — the customer picks text or PDF first (see
+    deliver_prescription), so nothing is pushed in a format they didn't
+    ask for. medications/treatment_plan are held on the session itself
+    (pending_medications/pending_treatment_plan) rather than re-derived
+    later from medical_records, so delivery is unambiguous even if the pet
+    has other historical records."""
     client = ctx.supabase
     session = _get_session(client, session_id)
     if not session:
@@ -741,22 +748,79 @@ async def file_prescription(
         }
     ).execute()
 
-    client.table("doctor_sessions").update({"awaiting_from": None}).eq("id", session_id).execute()
+    client.table("doctor_sessions").update(
+        {
+            "awaiting_from": "prescription_format_choice",
+            "pending_medications": medications,
+            "pending_treatment_plan": treatment_plan,
+        }
+    ).eq("id", session_id).execute()
 
     pet = _get_pet(client, session.get("pet_id"))
     pet_name = (pet.get("name") if pet else None) or "your pet"
     doctor_name = _doctor_name(client, session.get("doctor_phone"))
 
-    message = await _format_prescription_message(ctx, pet_name, doctor_name, session.get("case_summary", ""), medications, treatment_plan)
-    await _notify_household(ctx, session, message)
-    await _send_prescription_pdf(ctx, session, pet_name, doctor_name, medications, treatment_plan)
+    for phone in _household_phones(client, session):
+        try:
+            await ctx.whatsapp.send_interactive_buttons(
+                phone,
+                f"Your prescription for {pet_name} from {doctor_name} is ready. How would you like to receive it?",
+                [
+                    {"id": f"prescription_format|{session_id}|text", "title": "Text message"},
+                    {"id": f"prescription_format|{session_id}|pdf", "title": "PDF document"},
+                ],
+            )
+        except Exception:
+            logger.exception("Failed to ask household member %s for prescription format for session %s", phone, session_id)
 
     return {
         "success": True,
-        "mode": "prescription_filed",
+        "mode": "prescription_filed_awaiting_format_choice",
         "session_id": session_id,
-        "instruction_to_llm": "The formatted prescription and a PDF copy were already sent to the customer as "
-        "WhatsApp messages — just confirm briefly to the vet, don't restate its contents.",
+        "instruction_to_llm": "The prescription was filed and the customer was already asked (via WhatsApp "
+        "buttons) whether they want it as text or PDF — just confirm briefly to the vet that it's filed and "
+        "the customer's been asked, don't restate the medications/treatment plan yourself.",
+    }
+
+
+async def deliver_prescription(ctx: AppContext, agent_ctx: AgentContext, session_id: str, format: str) -> dict[str, Any]:
+    """The customer's answer to file_prescription's format-choice question —
+    delivers the already-filed medications/treatment plan in exactly the
+    format they picked, nothing more."""
+    client = ctx.supabase
+    session = _get_session(client, session_id)
+    if not session:
+        return {"success": False, "error": "session_not_found"}
+    if session.get("awaiting_from") != "prescription_format_choice":
+        # Idempotent: a re-tap or duplicate reply after it's already been
+        # delivered must never re-send the prescription a second time.
+        return {"success": True, "mode": "already_delivered", "session_id": session_id}
+
+    fmt = (format or "").strip().lower()
+    if fmt not in ("text", "pdf"):
+        return {"success": False, "error": "invalid_format", "message": "format must be 'text' or 'pdf'"}
+
+    medications = session.get("pending_medications") or ""
+    treatment_plan = session.get("pending_treatment_plan") or ""
+    pet = _get_pet(client, session.get("pet_id"))
+    pet_name = (pet.get("name") if pet else None) or "your pet"
+    doctor_name = _doctor_name(client, session.get("doctor_phone"))
+
+    if fmt == "text":
+        message = await _format_prescription_message(ctx, pet_name, doctor_name, session.get("case_summary", ""), medications, treatment_plan)
+        await _notify_household(ctx, session, message)
+    else:
+        await _send_prescription_pdf(ctx, session, pet_name, doctor_name, medications, treatment_plan)
+
+    client.table("doctor_sessions").update({"awaiting_from": None}).eq("id", session_id).execute()
+
+    return {
+        "success": True,
+        "mode": "prescription_delivered",
+        "format": fmt,
+        "session_id": session_id,
+        "instruction_to_llm": "The prescription was already sent to the customer in their chosen format — "
+        "just confirm briefly, don't restate its contents.",
     }
 
 

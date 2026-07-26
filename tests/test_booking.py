@@ -15,6 +15,7 @@ from app.agent.tools.booking import (
     _normalize_to_ist,
     book_slot,
     cancel_session,
+    deliver_prescription,
     file_prescription,
     handle_payment_webhook,
     mark_session_done,
@@ -207,20 +208,19 @@ async def test_mark_session_done_is_idempotent_and_never_double_notifies():
     ctx.whatsapp.send_text.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_file_prescription_sends_structured_summary_to_customer():
-    supabase = FakeSupabaseClient(
+def _prescription_test_session(**overrides):
+    session = {
+        "id": "session-a",
+        "profile_id": "profile-1",
+        "pet_id": "pet-a",
+        "doctor_phone": "919000000001",
+        "status": "completed",
+        "case_summary": "Coughing for 2 days",
+    }
+    session.update(overrides)
+    return FakeSupabaseClient(
         initial={
-            "doctor_sessions": [
-                {
-                    "id": "session-a",
-                    "profile_id": "profile-1",
-                    "pet_id": "pet-a",
-                    "doctor_phone": "919000000001",
-                    "status": "completed",
-                    "case_summary": "Coughing for 2 days",
-                }
-            ],
+            "doctor_sessions": [session],
             "profiles": [
                 {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
                 {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
@@ -228,6 +228,13 @@ async def test_file_prescription_sends_structured_summary_to_customer():
             "pets": [{"id": "pet-a", "name": "Max"}],
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_file_prescription_asks_customer_for_format_choice_instead_of_sending():
+    """Real behavior change: the vet's medications/treatment plan must not
+    reach the customer directly — they choose text or PDF first."""
+    supabase = _prescription_test_session()
     ctx = _make_ctx(supabase)
     agent_ctx = _make_agent_ctx(pets=[])
 
@@ -236,6 +243,37 @@ async def test_file_prescription_sends_structured_summary_to_customer():
     )
 
     assert result["success"] is True
+    assert result["mode"] == "prescription_filed_awaiting_format_choice"
+    ctx.whatsapp.send_text.assert_not_awaited()
+    ctx.whatsapp.send_interactive_buttons.assert_awaited_once()
+    call = ctx.whatsapp.send_interactive_buttons.call_args
+    assert call.args[0] == "919876543210"
+    button_ids = {b["id"] for b in call.args[2]}
+    assert button_ids == {"prescription_format|session-a|text", "prescription_format|session-a|pdf"}
+
+    record = supabase.rows("medical_records")[0]
+    assert record["medications"] == "Amoxicillin 250mg twice daily"
+
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["awaiting_from"] == "prescription_format_choice"
+    assert session["pending_medications"] == "Amoxicillin 250mg twice daily"
+    assert session["pending_treatment_plan"] == "Rest for 5 days"
+
+
+@pytest.mark.asyncio
+async def test_deliver_prescription_sends_text_when_chosen():
+    supabase = _prescription_test_session(
+        awaiting_from="prescription_format_choice",
+        pending_medications="Amoxicillin 250mg twice daily",
+        pending_treatment_plan="Rest for 5 days",
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await deliver_prescription(ctx, agent_ctx, session_id="session-a", format="text")
+
+    assert result["success"] is True
+    assert result["format"] == "text"
     ctx.whatsapp.send_text.assert_awaited_once()
     message = ctx.whatsapp.send_text.call_args[0][1]
     assert "Max" in message
@@ -244,35 +282,18 @@ async def test_file_prescription_sends_structured_summary_to_customer():
     assert "Amoxicillin 250mg twice daily" in message
     assert "Rest for 5 days" in message
 
-    record = supabase.rows("medical_records")[0]
-    assert record["pet_id"] == "pet-a"
-    assert record["medications"] == "Amoxicillin 250mg twice daily"
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["awaiting_from"] is None
 
 
 @pytest.mark.asyncio
-async def test_file_prescription_uses_llm_formatted_message_when_available(monkeypatch):
+async def test_deliver_prescription_uses_llm_formatted_message_when_available(monkeypatch):
     """The vet's own shorthand should be reorganized into a clean prescription
     layout rather than just echoed back under bare Medications:/Treatment
     plan: labels — but the underlying clinical content must still reach the
     customer, whichever path produced it."""
-    supabase = FakeSupabaseClient(
-        initial={
-            "doctor_sessions": [
-                {
-                    "id": "session-a",
-                    "profile_id": "profile-1",
-                    "pet_id": "pet-a",
-                    "doctor_phone": "919000000001",
-                    "status": "completed",
-                    "case_summary": "Coughing for 2 days",
-                }
-            ],
-            "profiles": [
-                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
-                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
-            ],
-            "pets": [{"id": "pet-a", "name": "Max"}],
-        }
+    supabase = _prescription_test_session(
+        awaiting_from="prescription_format_choice", pending_medications="amox 250 bid", pending_treatment_plan=""
     )
     ctx = _make_ctx(supabase)
     ctx.openai = object()
@@ -280,46 +301,28 @@ async def test_file_prescription_uses_llm_formatted_message_when_available(monke
     monkeypatch.setattr("app.agent.tools.booking.text_completion", AsyncMock(return_value=formatted_text))
     agent_ctx = _make_agent_ctx(pets=[])
 
-    result = await file_prescription(
-        ctx, agent_ctx, session_id="session-a", medications="amox 250 bid", treatment_plan=""
-    )
+    result = await deliver_prescription(ctx, agent_ctx, session_id="session-a", format="text")
 
     assert result["success"] is True
     ctx.whatsapp.send_text.assert_awaited_once_with("919876543210", formatted_text)
 
 
 @pytest.mark.asyncio
-async def test_file_prescription_falls_back_to_plain_layout_when_formatting_fails(monkeypatch):
+async def test_deliver_prescription_falls_back_to_plain_layout_when_formatting_fails(monkeypatch):
     """A failure in the formatting call (OpenAI down, timeout, etc.) must
     never lose the customer's prescription entirely — fall back to the
     plain deterministic layout instead of erroring the whole tool call out."""
-    supabase = FakeSupabaseClient(
-        initial={
-            "doctor_sessions": [
-                {
-                    "id": "session-a",
-                    "profile_id": "profile-1",
-                    "pet_id": "pet-a",
-                    "doctor_phone": "919000000001",
-                    "status": "completed",
-                    "case_summary": "Coughing for 2 days",
-                }
-            ],
-            "profiles": [
-                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
-                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
-            ],
-            "pets": [{"id": "pet-a", "name": "Max"}],
-        }
+    supabase = _prescription_test_session(
+        awaiting_from="prescription_format_choice",
+        pending_medications="Amoxicillin 250mg twice daily",
+        pending_treatment_plan="Rest for 5 days",
     )
     ctx = _make_ctx(supabase)
     ctx.openai = object()
     monkeypatch.setattr("app.agent.tools.booking.text_completion", AsyncMock(side_effect=RuntimeError("openai down")))
     agent_ctx = _make_agent_ctx(pets=[])
 
-    result = await file_prescription(
-        ctx, agent_ctx, session_id="session-a", medications="Amoxicillin 250mg twice daily", treatment_plan="Rest for 5 days"
-    )
+    result = await deliver_prescription(ctx, agent_ctx, session_id="session-a", format="text")
 
     assert result["success"] is True
     message = ctx.whatsapp.send_text.call_args[0][1]
@@ -328,25 +331,11 @@ async def test_file_prescription_falls_back_to_plain_layout_when_formatting_fail
 
 
 @pytest.mark.asyncio
-async def test_file_prescription_also_sends_a_pdf_copy(monkeypatch):
-    supabase = FakeSupabaseClient(
-        initial={
-            "doctor_sessions": [
-                {
-                    "id": "session-a",
-                    "profile_id": "profile-1",
-                    "pet_id": "pet-a",
-                    "doctor_phone": "919000000001",
-                    "status": "completed",
-                    "case_summary": "Coughing for 2 days",
-                }
-            ],
-            "profiles": [
-                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
-                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
-            ],
-            "pets": [{"id": "pet-a", "name": "Max"}],
-        }
+async def test_deliver_prescription_sends_pdf_when_chosen(monkeypatch):
+    supabase = _prescription_test_session(
+        awaiting_from="prescription_format_choice",
+        pending_medications="Amoxicillin 250mg twice daily",
+        pending_treatment_plan="Rest for 5 days",
     )
     ctx = _make_ctx(supabase)
     ctx.whatsapp.send_document = AsyncMock()
@@ -354,11 +343,11 @@ async def test_file_prescription_also_sends_a_pdf_copy(monkeypatch):
     monkeypatch.setattr("app.agent.tools.booking.sign_storage_url", lambda *a, **k: "https://signed.example/prescription.pdf")
     agent_ctx = _make_agent_ctx(pets=[])
 
-    result = await file_prescription(
-        ctx, agent_ctx, session_id="session-a", medications="Amoxicillin 250mg twice daily", treatment_plan="Rest for 5 days"
-    )
+    result = await deliver_prescription(ctx, agent_ctx, session_id="session-a", format="pdf")
 
     assert result["success"] is True
+    assert result["format"] == "pdf"
+    ctx.whatsapp.send_text.assert_not_awaited()
     ctx.whatsapp.send_document.assert_awaited_once_with(
         "919876543210", "https://signed.example/prescription.pdf", "Max_prescription.pdf", "Prescription for Max from Dr. Rao"
     )
@@ -368,10 +357,10 @@ async def test_file_prescription_also_sends_a_pdf_copy(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_prescription_pdf_uses_the_treating_vets_own_profile_fields(monkeypatch):
-    """Doctor name/qualification/registration/contact on the PDF are
-    per-consultation, sourced from the treating vet's own profile row —
-    not hardcoded clinic-wide values."""
+async def test_deliver_prescription_uses_the_treating_vets_own_profile_fields(monkeypatch):
+    """Doctor name/qualification/registration on the PDF are per-consultation,
+    sourced from the treating vet's own profile row — not hardcoded
+    clinic-wide values."""
     supabase = FakeSupabaseClient(
         initial={
             "doctor_sessions": [
@@ -382,6 +371,9 @@ async def test_prescription_pdf_uses_the_treating_vets_own_profile_fields(monkey
                     "doctor_phone": "919000000001",
                     "status": "completed",
                     "case_summary": "Coughing for 2 days",
+                    "awaiting_from": "prescription_format_choice",
+                    "pending_medications": "Amoxicillin 250mg twice daily",
+                    "pending_treatment_plan": "Rest for 5 days",
                 }
             ],
             "profiles": [
@@ -411,39 +403,21 @@ async def test_prescription_pdf_uses_the_treating_vets_own_profile_fields(monkey
     monkeypatch.setattr("app.agent.tools.booking.build_prescription_pdf", fake_build_prescription_pdf)
     agent_ctx = _make_agent_ctx(pets=[])
 
-    result = await file_prescription(
-        ctx, agent_ctx, session_id="session-a", medications="Amoxicillin 250mg twice daily", treatment_plan="Rest for 5 days"
-    )
+    result = await deliver_prescription(ctx, agent_ctx, session_id="session-a", format="pdf")
 
     assert result["success"] is True
     assert captured["doctor_qualification"] == "BVSc & AH, MVSc (Surgery)"
     assert captured["doctor_registration_number"] == "TNVC-2024-00123"
-    assert "doctor_phone" not in captured
 
 
 @pytest.mark.asyncio
-async def test_file_prescription_succeeds_even_if_pdf_generation_fails(monkeypatch):
-    """The PDF is a best-effort extra on top of the text summary already
-    sent — a storage/rendering failure must never fail the tool call or
-    stop the vet from getting confirmation it went through."""
-    supabase = FakeSupabaseClient(
-        initial={
-            "doctor_sessions": [
-                {
-                    "id": "session-a",
-                    "profile_id": "profile-1",
-                    "pet_id": "pet-a",
-                    "doctor_phone": "919000000001",
-                    "status": "completed",
-                    "case_summary": "Coughing for 2 days",
-                }
-            ],
-            "profiles": [
-                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
-                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
-            ],
-            "pets": [{"id": "pet-a", "name": "Max"}],
-        }
+async def test_deliver_prescription_succeeds_even_if_pdf_generation_fails(monkeypatch):
+    """The PDF send failing must never fail the whole tool call or leave
+    the customer's chosen format un-delivered without explanation."""
+    supabase = _prescription_test_session(
+        awaiting_from="prescription_format_choice",
+        pending_medications="Amoxicillin 250mg twice daily",
+        pending_treatment_plan="Rest for 5 days",
     )
     ctx = _make_ctx(supabase)
     monkeypatch.setattr(
@@ -452,12 +426,36 @@ async def test_file_prescription_succeeds_even_if_pdf_generation_fails(monkeypat
     )
     agent_ctx = _make_agent_ctx(pets=[])
 
-    result = await file_prescription(
-        ctx, agent_ctx, session_id="session-a", medications="Amoxicillin 250mg twice daily", treatment_plan="Rest for 5 days"
-    )
+    result = await deliver_prescription(ctx, agent_ctx, session_id="session-a", format="pdf")
 
     assert result["success"] is True
-    ctx.whatsapp.send_text.assert_awaited_once()  # the text summary still went out
+    assert result["format"] == "pdf"
+
+
+@pytest.mark.asyncio
+async def test_deliver_prescription_is_idempotent_once_already_delivered():
+    supabase = _prescription_test_session(awaiting_from=None)
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await deliver_prescription(ctx, agent_ctx, session_id="session-a", format="text")
+
+    assert result["success"] is True
+    assert result["mode"] == "already_delivered"
+    ctx.whatsapp.send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_prescription_rejects_invalid_format():
+    supabase = _prescription_test_session(awaiting_from="prescription_format_choice")
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await deliver_prescription(ctx, agent_ctx, session_id="session-a", format="carrier pigeon")
+
+    assert result["success"] is False
+    assert result["error"] == "invalid_format"
+    ctx.whatsapp.send_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio

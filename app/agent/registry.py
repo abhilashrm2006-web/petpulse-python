@@ -239,13 +239,23 @@ TOOL_SPECS: list[ToolSpec] = [
     ),
     _spec(
         "file_prescription",
-        "File the vet's prescription/treatment notes for a completed session. Automatically reformats the "
-        "vet's own words into a clean prescription layout (never inventing or altering the actual medications/ "
-        "doses/instructions) and sends that plus a downloadable PDF copy to the customer.",
+        "File the vet's prescription/treatment notes for a completed session. Does NOT send anything to the "
+        "customer yet — it asks them (via WhatsApp buttons) whether they want it as a text message or a PDF, "
+        "and delivery happens once they answer (see deliver_prescription).",
         {"session_id": _STR, "medications": _STR, "treatment_plan": _STR},
         ["session_id", "medications"],
         booking.file_prescription,
         VET,
+    ),
+    _spec(
+        "deliver_prescription",
+        "Deliver an already-filed prescription in the format the customer just picked. Call this once they've "
+        "answered the text-vs-PDF question file_prescription sent — a button tap or a plain 'text'/'pdf' reply "
+        "both count. Never invents or reformats the content itself beyond the format param.",
+        {"session_id": _STR, "format": {"type": "string", "description": "'text' or 'pdf', from the customer's own choice."}},
+        ["session_id", "format"],
+        booking.deliver_prescription,
+        CUSTOMER,
     ),
     _spec(
         "list_my_appointments",
