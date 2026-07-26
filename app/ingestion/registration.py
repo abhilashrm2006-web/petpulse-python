@@ -378,13 +378,20 @@ async def _start_subscription(ctx: AppContext, profile: dict[str, Any]) -> None:
     ctx.supabase.table("subscriptions").insert(
         {
             "profile_id": profile["id"],
-            "plan_name": "Subscriber",
-            "billing_cycle": "monthly",
+            # plan_name/billing_cycle/status are CHECK-constrained on the live
+            # table to these exact values (confirmed live -- "Subscriber",
+            # "monthly", and "pending" all violated the constraint before this
+            # fix): plan_name in Free/Basic/Premium/Family/Enterprise,
+            # billing_cycle in Monthly/Quarterly/Yearly, status in
+            # trial/active/expired/cancelled/paused.
+            "plan_name": "Premium",
+            "billing_cycle": "Monthly",
             "amount": 399,
             "currency": "INR",
-            "status": "pending",
+            "status": "trial",
             "payment_provider": "razorpay",
             "provider_subscription_id": subscription.get("id"),
+            "start_date": date.today().isoformat(),
         }
     ).execute()
     ctx.supabase.table("profiles").update({"registration_step": "completed"}).eq("id", profile["id"]).execute()

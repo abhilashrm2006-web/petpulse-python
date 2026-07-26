@@ -320,7 +320,10 @@ async def test_tier_choice_subscriber_creates_a_real_subscription(monkeypatch):
     create_subscription.assert_awaited_once()
     sub_row = supabase.rows("subscriptions")[0]
     assert sub_row["provider_subscription_id"] == "sub_123"
-    assert sub_row["status"] == "pending"
+    assert sub_row["status"] == "trial"
+    assert sub_row["plan_name"] == "Premium"
+    assert sub_row["billing_cycle"] == "Monthly"
+    assert sub_row["start_date"]
     assert supabase.rows("profiles")[0]["registration_step"] == "completed"
     assert "https://rzp.io/sub/abc" in ctx.whatsapp.send_text.call_args.args[1]
 
@@ -455,7 +458,7 @@ async def test_existing_verify_requires_a_button_tap():
 
 @pytest.mark.asyncio
 async def test_subscription_webhook_activated_marks_active():
-    supabase = FakeSupabaseClient(initial={"subscriptions": [{"id": "row-1", "provider_subscription_id": "sub_123", "status": "pending"}]})
+    supabase = FakeSupabaseClient(initial={"subscriptions": [{"id": "row-1", "provider_subscription_id": "sub_123", "status": "trial"}]})
     ctx = _make_ctx(supabase)
     event = {"event": "subscription.activated", "payload": {"subscription": {"entity": {"id": "sub_123", "notes": {}}}}}
 
