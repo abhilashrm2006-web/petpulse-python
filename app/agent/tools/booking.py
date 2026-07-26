@@ -22,14 +22,71 @@ from app.availability.slots import IST, compute_doctor_slots
 from app.deps import AppContext
 from app.ingestion.context import AgentContext
 from app.integrations import google_calendar, razorpay_client
-from app.integrations.supabase_client import get_pet_member_contacts, sign_storage_url, upload_to_storage
+from app.integrations.openai_client import text_completion
+from app.integrations.supabase_client import get_pet_member_contacts
 from app.utils.pet_resolution import AMBIGUOUS_PET, resolve_pet
 
 logger = logging.getLogger(__name__)
 
 MAX_DOCTORS_LISTED = 9
 SESSION_DURATION_MINUTES = 30
-PRESCRIPTION_GENERATOR_URL = "https://www.infyways.com/tools/prescription-generator/"
+
+PRESCRIPTION_FORMAT_SYSTEM_PROMPT = """You are formatting a veterinary prescription for a WhatsApp message. \
+You will be given the vet's own medications and treatment-plan text plus patient details. Reorganize them \
+into a clean, professional prescription layout using WhatsApp markdown (*bold* for headers, plain lines for \
+content, no HTML). Do NOT invent, add, remove, or alter any drug name, dose, frequency, or instruction beyond \
+what's given — only reorganize and lightly tidy the wording (e.g. expand obvious shorthand like "bid" -> \
+"twice daily" ONLY if unambiguous) of the exact same clinical facts the vet gave you. Use roughly this shape, \
+omitting any section with nothing to put in it:
+
+🐾 *Prescription — <pet name>*
+Vet: <doctor name>
+Date: <date>
+Reason for visit: <reason, if given>
+
+*Medications*
+<one line per medication>
+
+*Treatment Plan / Advice*
+<treatment plan / instructions>
+
+Respond with ONLY the formatted message text, nothing else — no preamble, no code fences."""
+
+
+async def _format_prescription_message(
+    ctx: AppContext,
+    pet_name: str,
+    doctor_name: str,
+    case_summary: str,
+    medications: str,
+    treatment_plan: str,
+) -> str:
+    """Turns the vet's own loosely-typed medications/treatment-plan text into
+    a clean prescription layout instead of just echoing it back under bare
+    "Medications:"/"Treatment plan:" labels. Falls back to that same plain
+    layout if the formatting call fails for any reason — the customer must
+    still get the actual clinical content even if the nicer formatting pass
+    doesn't come through."""
+    user_prompt = (
+        f"Pet: {pet_name}\nVet: {doctor_name}\nDate: {datetime.now(tz=IST).strftime('%d %b %Y')}\n"
+        f"Reason for visit: {case_summary or 'not stated'}\n"
+        f"Medications (vet's own words): {medications}\n"
+        f"Treatment plan (vet's own words): {treatment_plan or 'not stated'}"
+    )
+    try:
+        formatted = await text_completion(ctx.openai, ctx.settings, PRESCRIPTION_FORMAT_SYSTEM_PROMPT, user_prompt, reasoning_effort="low")
+        if formatted.strip():
+            return formatted.strip()
+    except Exception:
+        logger.exception("Prescription formatting call failed for pet %s, falling back to plain layout", pet_name)
+
+    lines = [f"*Session summary — {pet_name} with {doctor_name}*"]
+    if case_summary:
+        lines.append(f"Reason for visit: {case_summary}")
+    lines.append(f"Medications: {medications}")
+    if treatment_plan:
+        lines.append(f"Treatment plan: {treatment_plan}")
+    return "\n".join(lines)
 
 
 def _get_session(client, session_id: str) -> dict[str, Any] | None:
@@ -648,25 +705,7 @@ async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id
         "prescription/treatment notes shortly.",
     )
 
-    doctor_phone = session.get("doctor_phone")
-    if doctor_phone:
-        try:
-            await ctx.whatsapp.send_text(
-                doctor_phone,
-                f"Session with {pet_name}'s owner is now marked done. You can either type the "
-                "medications/treatment plan here, or use this prescription generator to create a "
-                "formatted document, then send me the resulting file (or your saved link) here and "
-                f"I'll forward it to the pet parent:\n{PRESCRIPTION_GENERATOR_URL}",
-            )
-        except Exception:
-            logger.exception("Failed to send prescription-generator link to doctor %s for session %s", doctor_phone, session_id)
-
-    return {
-        "success": True,
-        "mode": "session_completed",
-        "instruction_to_llm": "Ask the vet for the prescription/treatment notes, then call file_prescription — "
-        "or, if they instead send back a document/image, call file_prescription_document.",
-    }
+    return {"success": True, "mode": "session_completed", "instruction_to_llm": "Ask the vet for the prescription/treatment notes, then call file_prescription."}
 
 
 async def file_prescription(
@@ -695,105 +734,14 @@ async def file_prescription(
     pet_name = (pet.get("name") if pet else None) or "your pet"
     doctor_name = _doctor_name(client, session.get("doctor_phone"))
 
-    summary_lines = [f"*Session summary — {pet_name} with {doctor_name}*"]
-    if session.get("case_summary"):
-        summary_lines.append(f"Reason for visit: {session['case_summary']}")
-    summary_lines.append(f"Medications: {medications}")
-    if treatment_plan:
-        summary_lines.append(f"Treatment plan: {treatment_plan}")
-    await _notify_household(ctx, session, "\n".join(summary_lines))
+    message = await _format_prescription_message(ctx, pet_name, doctor_name, session.get("case_summary", ""), medications, treatment_plan)
+    await _notify_household(ctx, session, message)
 
     return {
         "success": True,
         "mode": "prescription_filed",
         "session_id": session_id,
-        "instruction_to_llm": "The session summary was already sent to the customer as a WhatsApp message — just confirm briefly to the vet, don't restate its contents.",
-    }
-
-
-async def file_prescription_document(
-    ctx: AppContext, agent_ctx: AgentContext, session_id: str, medications: str = "", treatment_plan: str = ""
-) -> dict[str, Any]:
-    """The vet used the external prescription-generator tool (or just
-    photographed/scanned a written prescription) and sent the resulting
-    file back instead of typing medications out — forward that exact file
-    to the household as the prescription, and still write the same
-    medical_records row file_prescription does so a formatted document
-    doesn't lose the structured history a typed prescription would keep."""
-    media = getattr(agent_ctx, "pending_media", None)
-    if not media or not media.document_bytes:
-        return {"success": False, "error": "no_pending_media", "message": "There's no prescription file from this turn to file."}
-
-    client = ctx.supabase
-    session = _get_session(client, session_id)
-    if not session:
-        return {"success": False, "error": "session_not_found"}
-
-    client.table("medical_records").insert(
-        {
-            "pet_id": session.get("pet_id"),
-            "profile_id": session["profile_id"],
-            "visit_date": datetime.now(tz=IST).date().isoformat(),
-            "chief_complaint": session.get("case_summary"),
-            "medications": medications or None,
-            "treatment_plan": treatment_plan or None,
-            "created_by": "vet",
-        }
-    ).execute()
-
-    client.table("doctor_sessions").update({"awaiting_from": None}).eq("id", session_id).execute()
-
-    pet = _get_pet(client, session.get("pet_id"))
-    pet_name = (pet.get("name") if pet else None) or "your pet"
-    doctor_name = _doctor_name(client, session.get("doctor_phone"))
-
-    ext = (media.document_mime_type or "").split("/")[-1] or "bin"
-    object_path = f"{session.get('pet_id') or 'unassigned'}/{int(datetime.now(tz=IST).timestamp())}-prescription.{ext}"
-    storage_path = f"medical-documents/{object_path}"
-    upload_to_storage(client, "medical-documents", object_path, media.document_bytes, media.document_mime_type or "application/octet-stream")
-    signed_url = sign_storage_url(client, "medical-documents", object_path)
-
-    client.table("documents").insert(
-        {
-            "pet_id": session.get("pet_id"),
-            "profile_id": session["profile_id"],
-            "document_name": f"Prescription - {pet_name}",
-            "document_type": "Prescription",
-            "storage_path": storage_path,
-            "mime_type": media.document_mime_type,
-            "ocr_text": media.media_context,
-            "ai_summary": (media.media_context or "")[:400],
-            "is_verified": True,
-        }
-    ).execute()
-
-    caption = f"Prescription for {pet_name} from {doctor_name}"
-    is_image = (media.document_mime_type or "").startswith("image/")
-    for phone in _household_phones(client, session):
-        try:
-            if is_image:
-                await ctx.whatsapp.send_image(phone, signed_url, caption)
-            else:
-                await ctx.whatsapp.send_document(phone, signed_url, f"prescription.{ext}", caption)
-        except Exception:
-            logger.exception("Failed to forward prescription document to %s for session %s", phone, session_id)
-
-    if medications or treatment_plan:
-        summary_lines = [f"*Session summary — {pet_name} with {doctor_name}*"]
-        if session.get("case_summary"):
-            summary_lines.append(f"Reason for visit: {session['case_summary']}")
-        if medications:
-            summary_lines.append(f"Medications: {medications}")
-        if treatment_plan:
-            summary_lines.append(f"Treatment plan: {treatment_plan}")
-        await _notify_household(ctx, session, "\n".join(summary_lines))
-
-    return {
-        "success": True,
-        "mode": "prescription_document_filed",
-        "session_id": session_id,
-        "instruction_to_llm": "The prescription file was already forwarded to the pet parent as a WhatsApp "
-        "attachment — just confirm briefly to the vet, don't restate its contents.",
+        "instruction_to_llm": "The formatted prescription was already sent to the customer as a WhatsApp message — just confirm briefly to the vet, don't restate its contents.",
     }
 
 

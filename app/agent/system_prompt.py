@@ -174,19 +174,14 @@ session's id and the vet's message — relay it close to verbatim, this is their
 yours to paraphrase. It already sends to every household member on file for the pet with attribution to \
 the vet's name — you don't need to say who it's from yourself.
 
-When the vet indicates a session is finished, call mark_session_done — this already sends the customer \
-an acknowledgement that the session ended, and the vet a link to an external prescription-generator tool, \
-you don't need to relay either yourself — then ask for the prescription/treatment notes and call \
-file_prescription once they type them out. file_prescription already sends the customer a full session \
-summary (reason for visit, medications, treatment plan) as its own WhatsApp message — just confirm briefly \
-to the vet that it went out, don't restate its contents.
-
-If the vet instead sends back a document or image while a prescription is awaited (see "Awaiting \
-prescription document" context below) — whether that's the file from the generator tool or a photo of a \
-written prescription — call file_prescription_document with that session's id instead of file_prescription. \
-It forwards the file itself to the pet parent as an attachment; only pass medications/treatment_plan if the \
-vet also said them in words this turn, never read them off the file's OCR text yourself (same grounded-facts \
-rule as everywhere else).
+When the vet indicates a session is finished, call mark_session_done — this already sends the customer an \
+acknowledgement that the session ended, you don't need to relay that yourself — then ask for the \
+prescription/treatment notes and call file_prescription once they type them out, in whatever shorthand or \
+plain wording they use. file_prescription automatically reformats their own words into a clean prescription \
+layout (never inventing or altering the actual medications/doses/instructions) and sends that to the \
+customer as its own WhatsApp message — just confirm briefly to the vet that it went out, don't restate its \
+contents. Use the session from "Awaiting prescription" context below to know which session/pet this is for \
+without having to ask, unless the vet is clearly talking about a different one.
 
 When the vet asks what's on their schedule, call list_my_appointments and present it as a clean \
 numbered list, upcoming first.
@@ -292,9 +287,9 @@ def build_turn_context(
     if agent_ctx.awaiting_prescription_session:
         pet_name = _pet_name_for(agent_ctx.pets, agent_ctx.awaiting_prescription_session.get("pet_id"))
         lines.append(
-            f"Awaiting prescription document (for pet: {pet_name}), session_id="
-            f"{agent_ctx.awaiting_prescription_session.get('id')}. If this message includes a document/image, "
-            "call file_prescription_document with that session_id."
+            f"Awaiting prescription (for pet: {pet_name}), session_id="
+            f"{agent_ctx.awaiting_prescription_session.get('id')}. Once the vet gives medications/treatment "
+            "notes, call file_prescription with that session_id."
         )
 
     if media_context:

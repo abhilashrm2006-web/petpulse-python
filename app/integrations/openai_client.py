@@ -55,6 +55,28 @@ async def json_completion(
     return resp.choices[0].message.content or "{}"
 
 
+async def text_completion(
+    client: AsyncOpenAI,
+    settings: Settings,
+    system_prompt: str,
+    user_prompt: str,
+    reasoning_effort: str = "low",
+    model: str | None = None,
+) -> str:
+    """Same shape as json_completion but for plain prose output — used where
+    the result is a message meant to be read as-is (e.g. a reformatted
+    prescription), not parsed as JSON."""
+    resp = await client.chat.completions.create(
+        model=model or settings.openai_reasoning_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        reasoning_effort=reasoning_effort,
+    )
+    return resp.choices[0].message.content or ""
+
+
 async def vision_completion(
     client: AsyncOpenAI,
     settings: Settings,
