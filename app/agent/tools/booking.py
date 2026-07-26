@@ -333,6 +333,46 @@ async def select_doctor(ctx: AppContext, agent_ctx: AgentContext, session_id: st
     return {"success": True, "mode": "slot_list_sent", "session_id": session_id}
 
 
+def _subscriber_quota_used_this_month(client, profile_id: str) -> bool:
+    """Counts sessions already covered by this month's included consult —
+    booking.py never books more than one "subscription_covered" session per
+    calendar month per profile, checked here rather than trusted from
+    agent_ctx since a session could have been booked earlier in the same
+    turn's month."""
+    month_start = datetime.now(tz=IST).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    rows = (
+        client.table("doctor_sessions")
+        .select("id")
+        .eq("profile_id", profile_id)
+        .eq("payment_status", "subscription_covered")
+        .gte("created_at", month_start)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return bool(rows)
+
+
+async def _confirm_subscriber_consult(ctx: AppContext, session: dict[str, Any], doctor_phone: str, start: datetime) -> dict[str, Any]:
+    """Same shape as _request_payment, minus Razorpay entirely -- this
+    month's consult is already paid for via the ₹399/month subscription, so
+    it goes straight to recording consent instead of a payment link."""
+    client = ctx.supabase
+    client.table("doctor_sessions").update(
+        {
+            "doctor_phone": doctor_phone,
+            "preferred_time": start.isoformat(),
+            "awaiting_from": "recording_consent",
+            "payment_status": "subscription_covered",
+            "recording_consent": "pending",
+        }
+    ).eq("id", session["id"]).execute()
+
+    session = {**session, "doctor_phone": doctor_phone, "preferred_time": start.isoformat()}
+    await _request_recording_consent(ctx, session)
+    return {"success": True, "mode": "subscriber_consult_confirmed", "session_id": session["id"]}
+
+
 async def book_slot(ctx: AppContext, agent_ctx: AgentContext, session_id: str, slot_start: str, doctor_phone: str = "") -> dict[str, Any]:
     client = ctx.supabase
     session = _get_session(client, session_id)
@@ -349,6 +389,17 @@ async def book_slot(ctx: AppContext, agent_ctx: AgentContext, session_id: str, s
     if not any(s.start == start for s in fresh_slots):
         return await select_doctor(ctx, agent_ctx, session_id, doctor_phone)  # slot taken, resend fresh list
 
+    # book_slot is subscriber_only-gated (registry.py), so any caller here is
+    # already a confirmed Subscriber -- the only remaining question is
+    # whether this month's included consult has already been used.
+    if not _subscriber_quota_used_this_month(client, session["profile_id"]):
+        return await _confirm_subscriber_consult(ctx, session, doctor_phone, start)
+
+    await ctx.whatsapp.send_text(
+        agent_ctx.profile["phone_number"],
+        "You've already used your free monthly consult. This one will need the regular consultation fee — "
+        "sending you a payment link now.",
+    )
     return await _request_payment(ctx, session, doctor_phone, start)
 
 
@@ -595,12 +646,17 @@ async def respond_to_time_proposal(ctx: AppContext, agent_ctx: AgentContext, ses
         start = datetime.fromisoformat(session["preferred_time"])
         if start.tzinfo is None:
             start = start.replace(tzinfo=IST)
-        # A reschedule of an already-paid session (calendar_event_id already exists)
-        # skips payment — the fee was already collected the first time this session
-        # was confirmed; only a session that's never been paid for gates on payment.
-        if session.get("payment_status") == "paid" or session.get("calendar_event_id"):
+        # A reschedule of an already-paid/already-covered session (calendar_event_id
+        # already exists) skips payment — the fee/quota was already spent the first
+        # time this session was confirmed; only a session that's never been paid for
+        # or covered gates on payment.
+        if session.get("payment_status") in ("paid", "subscription_covered") or session.get("calendar_event_id"):
             end = start + timedelta(minutes=SESSION_DURATION_MINUTES)
             return await _finalize_booking(ctx, session, session["doctor_phone"], start, end)
+
+        if agent_ctx.is_subscriber and not _subscriber_quota_used_this_month(ctx.supabase, session["profile_id"]):
+            return await _confirm_subscriber_consult(ctx, session, session["doctor_phone"], start)
+
         return await _request_payment(ctx, session, session["doctor_phone"], start)
 
     if decision == "decline":

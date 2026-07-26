@@ -715,11 +715,25 @@ async def test_finalize_booking_passes_attendee_emails(monkeypatch):
 async def test_book_slot_requests_payment_instead_of_finalizing_immediately(monkeypatch):
     """A booking must never go straight to a Calendar event/Meet link —
     the consult fee has to be collected first. book_slot should hold the
-    slot on the session and send a Razorpay payment link, not confirm."""
+    slot on the session and send a Razorpay payment link, not confirm.
+    This customer has already used their free monthly consult (an earlier
+    session-b this month, subscription_covered), so book_slot for session-a
+    must fall back to the paid flow instead of confirming it for free."""
+    from datetime import date
+
     supabase = FakeSupabaseClient(
         initial={
             "doctor_sessions": [
-                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "pending"}
+                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "pending"},
+                {
+                    "id": "session-b",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-b",
+                    "doctor_phone": "919000000002",
+                    "status": "accepted",
+                    "payment_status": "subscription_covered",
+                    "created_at": date.today().isoformat(),
+                },
             ],
             "profiles": [{"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"}],
         }
@@ -748,8 +762,47 @@ async def test_book_slot_requests_payment_instead_of_finalizing_immediately(monk
     assert session["awaiting_from"] == "payment"
     assert session["preferred_time"] == slot_start
 
-    ctx.whatsapp.send_text.assert_awaited_once()
+    # Two messages this time: the quota-exceeded notice, then the payment link itself.
+    assert ctx.whatsapp.send_text.await_count == 2
     assert "https://rzp.io/i/abc123" in ctx.whatsapp.send_text.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_book_slot_confirms_free_for_subscriber_with_quota_available(monkeypatch):
+    """A Subscriber who hasn't used this month's included consult yet should
+    be booked straight through with no Razorpay call at all — payment_status
+    becomes 'subscription_covered' and the flow goes directly to recording
+    consent, same shape as a paid booking from that point on."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "pending"}
+            ],
+            "profiles": [{"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    ctx.settings = SimpleNamespace(razorpay_consult_fee_inr=500, razorpay_key_id="x", razorpay_key_secret="y")
+    agent_ctx = _make_agent_ctx(pets=[])
+    agent_ctx.is_subscriber = True
+
+    slot_start = "2026-07-28T14:00:00+05:30"
+    start_dt = datetime.fromisoformat(slot_start)
+    monkeypatch.setattr("app.agent.tools.booking.compute_doctor_slots", AsyncMock(return_value=[Slot(start=start_dt, end=start_dt)]))
+    create_link = AsyncMock()
+    monkeypatch.setattr("app.agent.tools.booking.razorpay_client.create_payment_link", create_link)
+
+    result = await book_slot(ctx, agent_ctx, session_id="session-a", slot_start=slot_start, doctor_phone="919000000001")
+
+    assert result["success"] is True
+    assert result["mode"] == "subscriber_consult_confirmed"
+    create_link.assert_not_awaited()
+
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["payment_status"] == "subscription_covered"
+    assert session["awaiting_from"] == "recording_consent"
+    assert session["recording_consent"] == "pending"
+    ctx.whatsapp.send_interactive_buttons.assert_awaited_once()
 
 
 @pytest.mark.asyncio

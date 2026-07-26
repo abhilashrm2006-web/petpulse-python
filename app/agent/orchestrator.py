@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 from app.agent import memory
-from app.agent.registry import get_tool_fn, get_tool_schemas, is_tool_allowed_for_role
+from app.agent.registry import get_tool_fn, get_tool_schemas, is_tool_allowed_for_role, is_tool_allowed_for_tier
 from app.agent.system_prompt import build_system_prompt, build_turn_context
 from app.deps import AppContext
 from app.ingestion.context import AgentContext, mark_onboarding_complete_if_needed
@@ -33,8 +33,13 @@ logger = logging.getLogger(__name__)
 # gets the prescription itself plus a redundant "here it is!" bubble on top.
 SELF_MESSAGING_MODES = {
     "doctor_catalogue_sent", "new_parent_guide_sent", "slot_list_sent", "booked", "rescheduled", "payment_requested",
-    "prescription_delivered",
+    "prescription_delivered", "subscriber_consult_confirmed", "subscription_started",
 }
+
+SUBSCRIBER_ONLY_MESSAGE = (
+    "That's a Subscriber feature — subscribe for just ₹399/month to unlock it, including a free vet consult "
+    "every month! Want me to send you the subscribe link?"
+)
 
 
 def _tool_call_to_message_dict(message: Any) -> dict[str, Any]:
@@ -94,6 +99,8 @@ async def run_agent_turn(
 
             if not is_tool_allowed_for_role(name, role):
                 result: dict[str, Any] = {"success": False, "error": "tool_not_available_for_role"}
+            elif not is_tool_allowed_for_tier(name, role, agent_ctx.is_subscriber):
+                result = {"success": False, "error": "subscriber_only_feature", "message": SUBSCRIBER_ONLY_MESSAGE}
             else:
                 fn = get_tool_fn(name)
                 try:

@@ -8,6 +8,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 from app.deps import AppContext
+from app.integrations.supabase_client import is_active_subscriber
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,11 @@ async def send_vaccination_reminders(ctx: AppContext) -> None:
 
         for member in members:
             phone = (member.get("profiles") or {}).get("phone_number")
-            if phone:
+            profile_id = member.get("profile_id")
+            # Pet Vaccination Tracker (the passport + these prorata reminders) is a
+            # Subscriber-only feature -- a Free member on file for this pet just
+            # doesn't get pinged, same as every other gated feature.
+            if phone and profile_id and is_active_subscriber(client, profile_id):
                 try:
                     await ctx.whatsapp.send_text(phone, text)
                 except Exception:

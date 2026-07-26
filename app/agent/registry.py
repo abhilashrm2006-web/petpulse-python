@@ -7,7 +7,7 @@ made by the same LLM loop."""
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from app.agent.tools import booking, documents, onboarding, pet_members, pet_parent_guide, symptoms, vets
+from app.agent.tools import booking, documents, onboarding, pet_members, pet_parent_guide, subscriptions, symptoms, vets
 
 
 @dataclass
@@ -17,15 +17,28 @@ class ToolSpec:
     parameters: dict[str, Any]
     fn: Callable
     roles: set[str]
+    # Gated on subscription tier, on top of role -- only ever enforced for
+    # role="customer" (see is_tool_allowed_for_tier); a vet is never
+    # restricted by a customer's subscription tier.
+    subscriber_only: bool = False
 
 
-def _spec(name: str, description: str, properties: dict[str, Any], required: list[str], fn: Callable, roles: set[str]) -> ToolSpec:
+def _spec(
+    name: str,
+    description: str,
+    properties: dict[str, Any],
+    required: list[str],
+    fn: Callable,
+    roles: set[str],
+    subscriber_only: bool = False,
+) -> ToolSpec:
     return ToolSpec(
         name=name,
         description=description,
         parameters={"type": "object", "properties": properties, "required": required},
         fn=fn,
         roles=roles,
+        subscriber_only=subscriber_only,
     )
 
 
@@ -79,6 +92,7 @@ TOOL_SPECS: list[ToolSpec] = [
         [],
         vets.find_nearby_vets,
         CUSTOMER,
+        subscriber_only=True,
     ),
     _spec(
         "send_pet_document",
@@ -90,6 +104,7 @@ TOOL_SPECS: list[ToolSpec] = [
         [],
         documents.send_pet_document,
         CUSTOMER,
+        subscriber_only=True,
     ),
     _spec(
         "get_pet_passport",
@@ -107,6 +122,7 @@ TOOL_SPECS: list[ToolSpec] = [
         [],
         documents.get_pet_passport,
         CUSTOMER,
+        subscriber_only=True,
     ),
     _spec(
         "file_document",
@@ -123,6 +139,9 @@ TOOL_SPECS: list[ToolSpec] = [
         [],
         documents.file_document,
         BOTH,
+        # Only bites when role=customer (see is_tool_allowed_for_tier) -- a
+        # vet filing a document for a Free customer is never blocked.
+        subscriber_only=True,
     ),
     _spec(
         "start_new_pet_parent_guide",
@@ -156,6 +175,7 @@ TOOL_SPECS: list[ToolSpec] = [
         ["case_summary"],
         booking.request_doctor_session,
         CUSTOMER,
+        subscriber_only=True,
     ),
     _spec(
         "select_doctor",
@@ -164,14 +184,18 @@ TOOL_SPECS: list[ToolSpec] = [
         ["session_id", "doctor_phone"],
         booking.select_doctor,
         CUSTOMER,
+        subscriber_only=True,
     ),
     _spec(
         "book_slot",
-        "Customer picked a specific time slot — finalize the booking (with a fresh double-booking check).",
+        "Customer picked a specific time slot — finalize the booking (with a fresh double-booking check). "
+        "For a Subscriber this is free (included in their membership, 1/month) unless their monthly "
+        "consultation is already used, in which case it falls back to a paid link automatically.",
         {"session_id": _STR, "slot_start": {"type": "string", "description": "ISO 8601 timestamp."}, "doctor_phone": _STR},
         ["session_id", "slot_start"],
         booking.book_slot,
         CUSTOMER,
+        subscriber_only=True,
     ),
     _spec(
         "propose_time",
@@ -295,6 +319,16 @@ TOOL_SPECS: list[ToolSpec] = [
         booking.relay_to_doctor,
         CUSTOMER,
     ),
+    _spec(
+        "start_subscription",
+        "Start a PetPulse Subscriber signup (₹399/month) for the customer — sends them a Razorpay link. Call "
+        "this whenever they ask to subscribe/upgrade, including right after a subscriber_only_feature message "
+        "if they say they want to. Never subscriber-gated itself — it's how a Free customer becomes one.",
+        {},
+        [],
+        subscriptions.start_subscription,
+        CUSTOMER,
+    ),
 ]
 
 _BY_NAME = {spec.name: spec for spec in TOOL_SPECS}
@@ -316,3 +350,15 @@ def get_tool_fn(name: str) -> Callable | None:
 def is_tool_allowed_for_role(name: str, role: str) -> bool:
     spec = _BY_NAME.get(name)
     return bool(spec and role in spec.roles)
+
+
+def is_tool_allowed_for_tier(name: str, role: str, is_subscriber: bool) -> bool:
+    """Tier gating only ever applies to customer-initiated calls -- a vet
+    is never restricted by a customer's subscription tier (e.g. filing a
+    document for a Free customer still works)."""
+    if role != "customer":
+        return True
+    spec = _BY_NAME.get(name)
+    if not spec or not spec.subscriber_only:
+        return True
+    return is_subscriber

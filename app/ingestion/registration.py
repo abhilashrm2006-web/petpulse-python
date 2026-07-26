@@ -15,6 +15,7 @@ import re
 from datetime import date, datetime, timezone
 from typing import Any
 
+from app.agent.tools.subscriptions import create_and_send_subscription
 from app.deps import AppContext
 from app.ingestion.webhook import ExtractedMessage
 from app.integrations import razorpay_client
@@ -342,7 +343,7 @@ async def _handle_tier_choice(ctx: AppContext, profile: dict[str, Any], reply: s
         )
         return True
     if reply == "subscriber":
-        await _start_subscription(ctx, profile)
+        await _complete_wizard_with_subscription(ctx, profile)
         return True
     await ctx.whatsapp.send_interactive_buttons(phone, "Please choose one of the options below.", TIER_BUTTONS)
     return True
@@ -358,50 +359,20 @@ async def _handle_free_subchoice(ctx: AppContext, profile: dict[str, Any], reply
         )
         return True
     if reply == "subscribe":
-        await _start_subscription(ctx, profile)
+        await _complete_wizard_with_subscription(ctx, profile)
         return True
     await ctx.whatsapp.send_interactive_buttons(phone, "Please choose one of the options below.", FREE_SUBCHOICE_BUTTONS)
     return True
 
 
-async def _start_subscription(ctx: AppContext, profile: dict[str, Any]) -> None:
-    phone = profile["phone_number"]
-    try:
-        subscription = await razorpay_client.create_subscription(
-            ctx.settings, customer_name=profile.get("full_name") or "", customer_phone=phone, reference_id=profile["id"]
-        )
-    except Exception:
-        logger.exception("Failed to create Razorpay subscription for profile %s", profile["id"])
-        await ctx.whatsapp.send_text(phone, "Sorry, something went wrong setting up your subscription. Please try again in a moment.")
-        return
-
-    ctx.supabase.table("subscriptions").insert(
-        {
-            "profile_id": profile["id"],
-            # plan_name/billing_cycle/status are CHECK-constrained on the live
-            # table to these exact values (confirmed live -- "Subscriber",
-            # "monthly", and "pending" all violated the constraint before this
-            # fix): plan_name in Free/Basic/Premium/Family/Enterprise,
-            # billing_cycle in Monthly/Quarterly/Yearly, status in
-            # trial/active/expired/cancelled/paused.
-            "plan_name": "Premium",
-            "billing_cycle": "Monthly",
-            "amount": 399,
-            "currency": "INR",
-            "status": "trial",
-            "payment_provider": "razorpay",
-            "provider_subscription_id": subscription.get("id"),
-            "start_date": date.today().isoformat(),
-        }
-    ).execute()
+async def _complete_wizard_with_subscription(ctx: AppContext, profile: dict[str, Any]) -> None:
+    """The wizard is done either way once this is called -- even if the
+    Razorpay/storage call inside create_and_send_subscription fails, being
+    stuck re-showing the tier-choice buttons forever is worse than being
+    marked complete with a failed subscribe attempt they can retry later
+    via the start_subscription agent tool."""
+    await create_and_send_subscription(ctx, profile)
     ctx.supabase.table("profiles").update({"registration_step": "completed"}).eq("id", profile["id"]).execute()
-
-    short_url = subscription.get("short_url", "")
-    await ctx.whatsapp.send_text(
-        phone,
-        "Almost there! Complete your PetPulse Subscriber signup (₹399/month) here:\n"
-        f"{short_url}\n\nYou're all set to chat in the meantime — ask me anything about your pet!",
-    )
 
 
 async def _handle_existing_phone(ctx: AppContext, profile: dict[str, Any], extracted: ExtractedMessage) -> bool:

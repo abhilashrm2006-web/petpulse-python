@@ -312,7 +312,7 @@ async def test_tier_choice_subscriber_creates_a_real_subscription(monkeypatch):
     supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_tier_choice", full_name="Anudeep")]})
     ctx = _make_ctx(supabase)
     create_subscription = AsyncMock(return_value={"id": "sub_123", "short_url": "https://rzp.io/sub/abc"})
-    monkeypatch.setattr("app.ingestion.registration.razorpay_client.create_subscription", create_subscription)
+    monkeypatch.setattr("app.agent.tools.subscriptions.razorpay_client.create_subscription", create_subscription)
 
     handled = await handle_registration(ctx, _msg(button_reply_id="tier_choice|subscriber"))
 
@@ -333,7 +333,7 @@ async def test_free_subchoice_subscribe_also_creates_a_subscription(monkeypatch)
     supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_free_subchoice")]})
     ctx = _make_ctx(supabase)
     create_subscription = AsyncMock(return_value={"id": "sub_456", "short_url": "https://rzp.io/sub/def"})
-    monkeypatch.setattr("app.ingestion.registration.razorpay_client.create_subscription", create_subscription)
+    monkeypatch.setattr("app.agent.tools.subscriptions.razorpay_client.create_subscription", create_subscription)
 
     handled = await handle_registration(ctx, _msg(button_reply_id="free_subchoice|subscribe"))
 
@@ -347,7 +347,7 @@ async def test_subscription_creation_failure_sends_friendly_error_not_a_crash(mo
     supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_tier_choice")]})
     ctx = _make_ctx(supabase)
     monkeypatch.setattr(
-        "app.ingestion.registration.razorpay_client.create_subscription", AsyncMock(side_effect=RuntimeError("razorpay down"))
+        "app.agent.tools.subscriptions.razorpay_client.create_subscription", AsyncMock(side_effect=RuntimeError("razorpay down"))
     )
 
     handled = await handle_registration(ctx, _msg(button_reply_id="tier_choice|subscriber"))
@@ -356,6 +356,10 @@ async def test_subscription_creation_failure_sends_friendly_error_not_a_crash(mo
     assert supabase.rows("subscriptions") == []
     ctx.whatsapp.send_text.assert_awaited_once()
     assert "went wrong" in ctx.whatsapp.send_text.call_args.args[1].lower()
+    # Being stuck re-showing the tier-choice buttons forever would be worse
+    # than completing the wizard with a failed subscribe attempt they can
+    # retry later via the start_subscription agent tool.
+    assert supabase.rows("profiles")[0]["registration_step"] == "completed"
 
 
 # --- Existing Member path -----------------------------------------------

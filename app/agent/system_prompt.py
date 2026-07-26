@@ -80,6 +80,10 @@ specific missing detail blocks the advice you're about to give. Save any volunte
 save_onboarding_field even if the customer wasn't asked for it. Validation: dob is an ISO date, age is a \
 plain integer number of years, weight is in kg (convert lbs by x0.4536), email must be a valid address.
 
+Subscriber-only features: if a tool call comes back with error="subscriber_only_feature", relay its \
+message field to the customer near-verbatim — don't soften it or invent extra detail. If they then say \
+they want to subscribe/upgrade, call start_subscription right away.
+
 Adding/registering a pet: calling save_onboarding_field with field="pet_name" (then species/breed/age/dob \
 as they're mentioned) is what actually creates the pet record — start_new_pet_parent_guide never does. \
 MANDATORY: if the customer's current message already states concrete pet details — name, species, breed, \
