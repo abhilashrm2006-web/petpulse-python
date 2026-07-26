@@ -41,7 +41,14 @@ async def add_pet_member(
     if invitee:
         invitee_profile = invitee[0]
     else:
-        created = client.table("profiles").insert({"phone_number": normalized_phone, "full_name": member_name}).execute()
+        # A brand-new phone number invited with role="vet" must actually become a
+        # vet in profiles.role, not just a pet_members row -- otherwise every
+        # vet-gated tool (accept_session, file_prescription, etc.) stays
+        # unavailable to them the first time they message the bot.
+        new_profile = {"phone_number": normalized_phone, "full_name": member_name}
+        if role == "vet":
+            new_profile["role"] = "vet"
+        created = client.table("profiles").insert(new_profile).execute()
         invitee_profile = created.data[0]
         is_new_user = True
 
