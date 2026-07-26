@@ -7,7 +7,7 @@ had to silently cross-reference it against the pets list and didn't
 reliably do so. Fix: resolve the name explicitly and state in the prompt
 that the open session is scoped to that pet only."""
 
-from app.agent.system_prompt import GREETING_RULE, _pet_name_for, build_system_prompt, build_turn_context
+from app.agent.system_prompt import CUSTOMER_RULES, GREETING_RULE, VET_RULES, _pet_name_for, build_system_prompt, build_turn_context
 from app.ingestion.context import AgentContext
 from app.ingestion.webhook import ExtractedMessage
 
@@ -24,6 +24,18 @@ def test_greeting_rule_forbids_unprompted_symptom_recap():
 def test_greeting_rule_only_applies_to_customer_role():
     assert GREETING_RULE in build_system_prompt("customer")
     assert GREETING_RULE not in build_system_prompt("vet")
+
+
+def test_general_pet_qa_is_explicitly_in_scope_for_customers():
+    """Product requirement: the bot should act like a general conversational
+    assistant for ANY pet-related question (nutrition, training, behavior,
+    etc.), not just the specific workflows (onboarding/booking/documents/
+    triage) — this must be stated explicitly, not left implicit, or the
+    model may default to deflecting off-tool questions as out of scope."""
+    assert "General pet Q&A" in CUSTOMER_RULES
+    assert "nutrition" in CUSTOMER_RULES.lower()
+    assert "GROUNDED FACTS ONLY still applies" in CUSTOMER_RULES
+    assert "General pet Q&A" not in VET_RULES
 
 PETS = [
     {"id": "pet-thomas", "name": "Thomas", "species": "Dog"},
