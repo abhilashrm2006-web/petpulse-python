@@ -304,6 +304,14 @@ def build_turn_context(
     if media_context:
         lines.append(f"Media Context: {media_context}")
 
+    if extracted.latitude is not None and extracted.longitude is not None:
+        lines.append(
+            f"Shared location pin this turn: latitude={extracted.latitude}, longitude={extracted.longitude}"
+            + (f", name/address={extracted.location_text}" if extracted.location_text else "")
+            + ". Pass these coordinates directly to find_nearby_vets (latitude/longitude params) if this "
+            "message is about finding a vet — don't ask for a typed location when a pin was already shared."
+        )
+
     lines.append(f"Current Date/Time (IST): {now}")
 
     return "\n".join(lines)

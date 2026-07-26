@@ -75,3 +75,35 @@ def test_open_session_names_its_pet_and_warns_about_different_pet_requests():
     assert "Open booking session (for pet: Thomas)" in context
     assert "scoped ONLY to Thomas" in context
     assert "Active pet: maxc" in context
+
+
+def test_shared_location_pin_is_surfaced_for_find_nearby_vets():
+    """Bug: find_nearby_vets accepts latitude/longitude and its own tool
+    description says to use a shared location pin if available, but the
+    coordinates were parsed out of the webhook payload and then never
+    included anywhere in the turn context the model actually sees."""
+    agent_ctx = _make_agent_ctx()
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.1",
+        timestamp="1700000000", message_type="location", text="",
+        latitude=13.0067, longitude=80.2206, location_text="Puzhuthivakkam, Chennai",
+    )
+
+    context = build_turn_context(agent_ctx, extracted, media_context="", document_filing_status="")
+
+    assert "latitude=13.0067" in context
+    assert "longitude=80.2206" in context
+    assert "Puzhuthivakkam, Chennai" in context
+    assert "find_nearby_vets" in context
+
+
+def test_no_location_line_when_no_pin_shared():
+    agent_ctx = _make_agent_ctx()
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.1",
+        timestamp="1700000000", message_type="text", text="find me a vet nearby",
+    )
+
+    context = build_turn_context(agent_ctx, extracted, media_context="", document_filing_status="")
+
+    assert "Shared location pin" not in context

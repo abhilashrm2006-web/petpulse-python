@@ -28,8 +28,12 @@ logger = logging.getLogger(__name__)
 # on top — the customer saw the same date/time and Meet link twice, split
 # across multiple WhatsApp bubbles. "payment_requested" is the same class of
 # bug waiting to happen: _request_payment already sent the payment link.
+# "prescription_delivered" is that same class again: deliver_prescription
+# already sends the text/PDF directly, so without suppression the customer
+# gets the prescription itself plus a redundant "here it is!" bubble on top.
 SELF_MESSAGING_MODES = {
     "doctor_catalogue_sent", "new_parent_guide_sent", "slot_list_sent", "booked", "rescheduled", "payment_requested",
+    "prescription_delivered",
 }
 
 
