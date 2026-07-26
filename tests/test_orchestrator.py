@@ -96,7 +96,7 @@ async def test_agent_calls_the_tool_the_model_picks_then_stops(monkeypatch):
         supabase=_make_supabase_mock(),
         openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=True)  # check_symptoms is subscriber_only
+    agent_ctx = _make_agent_ctx()  # check_symptoms is open to Free customers too
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.1",
         timestamp="1700000000", message_type="text", text="Rex has been vomiting",
@@ -253,16 +253,16 @@ async def test_free_customer_blocked_from_subscriber_only_tool_with_upsell(monke
 
 
 @pytest.mark.asyncio
-async def test_free_customer_blocked_from_check_symptoms_with_upsell(monkeypatch):
-    """The structured triage tool (check_symptoms) is now Subscriber-only --
-    a Free customer reporting a new symptom must never reach the real
-    triage call; the orchestrator should short-circuit with a
-    subscriber_only_feature error instead."""
+async def test_free_customer_can_still_reach_check_symptoms(monkeypatch):
+    """The triage assessment itself is never paywalled -- a Free customer
+    reporting a symptom must reach the real check_symptoms call. Only
+    booking an actual consultation afterward is Subscriber-gated (covered
+    by the book_slot test above)."""
     tool_calls_made = []
 
     async def fake_tool(ctx, agent_ctx, **kwargs):
         tool_calls_made.append(kwargs)
-        return {"success": True, "severity": 4}
+        return {"success": True, "severity": 4, "severity_display": "🟠 Urgent (4/5)"}
 
     monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [{"type": "function", "function": {"name": "check_symptoms"}}])
     monkeypatch.setattr(orchestrator, "get_tool_fn", lambda name: fake_tool)
@@ -270,7 +270,7 @@ async def test_free_customer_blocked_from_check_symptoms_with_upsell(monkeypatch
 
     responses = [
         _fake_response(None, [_fake_tool_call("call-1", "check_symptoms", {"symptoms": "vomiting"})]),
-        _fake_response("That's a Subscriber feature — want the subscribe link?", None),
+        _fake_response("🟠 Urgent (4/5) — would you like to book a vet consultation for this?", None),
     ]
 
     async def fake_chat_with_tools(client, settings, messages, tools):
@@ -297,6 +297,6 @@ async def test_free_customer_blocked_from_check_symptoms_with_upsell(monkeypatch
 
     result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
 
-    assert tool_calls_made == []
-    assert result == "That's a Subscriber feature — want the subscribe link?"
+    assert tool_calls_made == [{"symptoms": "vomiting"}]  # the real tool WAS called for a Free customer
+    assert result == "🟠 Urgent (4/5) — would you like to book a vet consultation for this?"
     ctx.whatsapp.send_reply_and_chunk.assert_awaited_once_with("919876543210", result)

@@ -70,7 +70,8 @@ TOOL_SPECS: list[ToolSpec] = [
         "check_symptoms",
         "Run a structured triage assessment (1-5 severity rating) on a NEW symptom or health concern — "
         "whether the customer typed it, or you noticed it yourself in a photo, video, or voice note. Always "
-        "call this before giving your own clinical read, for any modality. Subscriber-only.",
+        "call this before giving your own clinical read, for any modality. Available to Free and Subscriber "
+        "customers alike — only booking an actual consultation is Subscriber-gated.",
         {
             "pet_id": _STR, "pet_name": _STR, "species": _STR,
             "symptoms": {
@@ -83,7 +84,6 @@ TOOL_SPECS: list[ToolSpec] = [
         ["symptoms"],
         symptoms.check_symptoms,
         CUSTOMER,
-        subscriber_only=True,
     ),
     _spec(
         "find_nearby_vets",

@@ -18,8 +18,10 @@ def test_non_gated_tool_allowed_for_free_customer():
     assert is_tool_allowed_for_tier("save_onboarding_field", "customer", is_subscriber=False) is True
 
 
-def test_check_symptoms_is_subscriber_only():
-    assert is_tool_allowed_for_tier("check_symptoms", "customer", is_subscriber=False) is False
+def test_check_symptoms_is_open_to_free_and_subscriber_alike():
+    """The triage assessment itself is never paywalled -- only booking an
+    actual consultation is Subscriber-gated (see book_slot above)."""
+    assert is_tool_allowed_for_tier("check_symptoms", "customer", is_subscriber=False) is True
     assert is_tool_allowed_for_tier("check_symptoms", "customer", is_subscriber=True) is True
 
 
