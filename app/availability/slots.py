@@ -75,6 +75,21 @@ def generate_slots(now: datetime, busy: list[tuple[datetime, datetime]]) -> list
     return slots
 
 
+def _parse_calendar_boundary(raw: str) -> datetime:
+    """A timed event's "dateTime" always carries a real UTC offset, so
+    .astimezone(IST) converts it correctly. An all-day event's "date" (e.g.
+    "2026-07-27") has no time or offset at all -- fromisoformat produces a
+    naive datetime, and .astimezone() on a naive datetime assumes the
+    server's LOCAL system timezone before converting, not literally IST
+    midnight. On a server whose system tz isn't IST (Docker/Railway default
+    to UTC), that silently shifts a vet's full-day block by hours. Attach
+    IST directly instead of letting astimezone() guess."""
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=IST)
+    return parsed.astimezone(IST)
+
+
 async def compute_doctor_slots(settings: Settings, now: datetime | None = None) -> list[Slot]:
     now = (now or datetime.now(tz=timezone.utc)).astimezone(IST)
     window_end = now + timedelta(days=MAX_DAYS)
@@ -86,6 +101,6 @@ async def compute_doctor_slots(settings: Settings, now: datetime | None = None) 
         end_raw = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
         if not start_raw or not end_raw:
             continue
-        busy.append((datetime.fromisoformat(start_raw).astimezone(IST), datetime.fromisoformat(end_raw).astimezone(IST)))
+        busy.append((_parse_calendar_boundary(start_raw), _parse_calendar_boundary(end_raw)))
 
     return generate_slots(now, busy)

@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 
-from app.availability.slots import IST, MAX_DAYS, MAX_PER_DAY, generate_slots
+import pytest
+
+from app.availability.slots import IST, MAX_DAYS, MAX_PER_DAY, _parse_calendar_boundary, compute_doctor_slots, generate_slots
 
 
 def _next_weekday(base: datetime, target_weekday: int) -> datetime:
@@ -54,3 +56,44 @@ def test_buffer_pushes_first_slot_later_same_day():
     slots = generate_slots(late_morning, busy=[])
     today_slots = [s for s in slots if s.start.date() == late_morning.date()]
     assert all(s.start.hour >= 17 for s in today_slots)
+
+
+def test_parse_calendar_boundary_anchors_all_day_events_to_ist_midnight():
+    """Reproduces an audit finding: a Google Calendar all-day event reports
+    its bounds as a bare "date" (e.g. "2026-07-27"), no time or offset.
+    fromisoformat() on that produces a naive datetime, and calling
+    .astimezone(IST) directly on a naive datetime interprets it as the
+    SERVER's local system timezone first -- not literally IST midnight. On
+    a UTC-default server (Docker/Railway), that used to shift a vet's
+    full-day block by 5.5 hours."""
+    result = _parse_calendar_boundary("2026-07-27")
+
+    assert result == datetime(2026, 7, 27, 0, 0, tzinfo=IST)
+    assert result.utcoffset() == timedelta(hours=5, minutes=30)
+
+
+def test_parse_calendar_boundary_converts_timed_events_to_ist():
+    result = _parse_calendar_boundary("2026-07-27T10:00:00Z")
+
+    assert result == datetime(2026, 7, 27, 15, 30, tzinfo=IST)
+
+
+@pytest.mark.asyncio
+async def test_compute_doctor_slots_blocks_the_whole_day_for_an_all_day_event(monkeypatch):
+    """End-to-end version of the fix above: a vet's all-day "day off" event
+    must block every slot that day, regardless of the server's system
+    timezone."""
+    from app.availability import slots as slots_module
+
+    tuesday_9am = MONDAY_9AM + timedelta(days=1)
+    day_str = tuesday_9am.date().isoformat()
+    next_day_str = (tuesday_9am.date() + timedelta(days=1)).isoformat()
+
+    async def fake_list_busy_events(settings, time_min, time_max):
+        return [{"start": {"date": day_str}, "end": {"date": next_day_str}}]
+
+    monkeypatch.setattr(slots_module.google_calendar, "list_busy_events", fake_list_busy_events)
+
+    result = await compute_doctor_slots(settings=None, now=tuesday_9am)
+
+    assert not any(s.start.date() == tuesday_9am.date() for s in result)
