@@ -246,6 +246,19 @@ TOOL_SPECS: list[ToolSpec] = [
         VET,
     ),
     _spec(
+        "file_prescription_document",
+        "The vet sent back a document/image (e.g. from the external prescription-generator tool, or a photo "
+        "of a written prescription) instead of typing the prescription out. Forwards that exact file to the "
+        "pet parent as the prescription and files the same medical-record entry file_prescription would. Use "
+        "the session from Awaiting prescription document context below. Pass medications/treatment_plan only "
+        "if the vet also mentioned them in words this turn — leave blank otherwise, don't invent them from the "
+        "file's OCR text.",
+        {"session_id": _STR, "medications": _STR, "treatment_plan": _STR},
+        ["session_id"],
+        booking.file_prescription_document,
+        VET,
+    ),
+    _spec(
         "list_my_appointments",
         "List the vet's upcoming accepted sessions.",
         {},

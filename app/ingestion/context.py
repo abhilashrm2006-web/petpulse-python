@@ -34,6 +34,7 @@ class AgentContext:
     pending_negotiation: dict[str, Any] | None
     onboarding: dict[str, Any] = field(default_factory=dict)
     pending_media: Any = None  # set post-construction to this turn's MediaResult (app.ingestion.media), if any
+    awaiting_prescription_session: dict[str, Any] | None = None
 
 
 async def _to_thread(fn, *args, **kwargs):
@@ -135,6 +136,26 @@ def _load_doctor_open_session(client: Client, doctor_phone: str) -> dict[str, An
     return resp.data[0] if resp.data else None
 
 
+def _load_awaiting_prescription_session(client: Client, doctor_phone: str) -> dict[str, Any] | None:
+    """A completed session still awaiting_from="doctor_prescription" isn't
+    picked up by _load_doctor_open_session (its status query only covers
+    pending/negotiating/accepted), so without this the vet's follow-up
+    message has no deterministic way to know which session a document they
+    send belongs to — surfacing it here, not relying on chat-history recall,
+    is what lets file_prescription_document be called reliably."""
+    resp = (
+        client.table("doctor_sessions")
+        .select("*")
+        .eq("doctor_phone", doctor_phone)
+        .eq("status", "completed")
+        .eq("awaiting_from", "doctor_prescription")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
 def compute_onboarding_status(profile: dict[str, Any], pets: list[dict[str, Any]]) -> dict[str, Any]:
     primary_pet = pets[0] if pets else {}
     field_values = {
@@ -162,12 +183,16 @@ async def build_context(client: Client, extracted: ExtractedMessage) -> AgentCon
     active_pet, active_pet_matched = resolve_active_pet_from_message(pets, extracted.text)
 
     if role == "vet":
-        open_session = await _to_thread(_load_doctor_open_session, client, extracted.phone_number)
+        open_session, awaiting_prescription_session = await asyncio.gather(
+            _to_thread(_load_doctor_open_session, client, extracted.phone_number),
+            _to_thread(_load_awaiting_prescription_session, client, extracted.phone_number),
+        )
         pending_negotiation = None
         memory_context: list[dict[str, Any]] = []
         medical_context: dict[str, Any] = {}
         knowledge_base: list[dict[str, Any]] = []
     else:
+        awaiting_prescription_session = None
         memory_context, medical_context, knowledge_base, open_session, pending_negotiation = await asyncio.gather(
             _to_thread(_load_memory, client, profile["id"], active_pet["id"] if active_pet else None),
             _to_thread(_load_medical_context, client, profile["id"]),
@@ -191,6 +216,7 @@ async def build_context(client: Client, extracted: ExtractedMessage) -> AgentCon
         open_session=open_session,
         pending_negotiation=pending_negotiation,
         onboarding=onboarding,
+        awaiting_prescription_session=awaiting_prescription_session,
     )
 
 

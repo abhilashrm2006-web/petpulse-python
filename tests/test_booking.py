@@ -16,6 +16,7 @@ from app.agent.tools.booking import (
     book_slot,
     cancel_session,
     file_prescription,
+    file_prescription_document,
     handle_payment_webhook,
     mark_session_done,
     propose_time,
@@ -171,12 +172,14 @@ async def test_mark_session_done_acknowledges_customer_immediately():
     result = await mark_session_done(ctx, agent_ctx, session_id="session-a")
 
     assert result["success"] is True
-    ctx.whatsapp.send_text.assert_awaited_once()
-    call_args = ctx.whatsapp.send_text.call_args
-    assert call_args[0][0] == "919876543210"
-    assert "Dr. Rao" in call_args[0][1]
-    assert "Max" in call_args[0][1]
-    assert "ended" in call_args[0][1]
+    assert ctx.whatsapp.send_text.await_count == 2
+    customer_call = next(c for c in ctx.whatsapp.send_text.call_args_list if c.args[0] == "919876543210")
+    assert "Dr. Rao" in customer_call.args[1]
+    assert "Max" in customer_call.args[1]
+    assert "ended" in customer_call.args[1]
+
+    doctor_call = next(c for c in ctx.whatsapp.send_text.call_args_list if c.args[0] == "919000000001")
+    assert "infyways.com" in doctor_call.args[1]
 
 
 @pytest.mark.asyncio
@@ -247,6 +250,105 @@ async def test_file_prescription_sends_structured_summary_to_customer():
     record = supabase.rows("medical_records")[0]
     assert record["pet_id"] == "pet-a"
     assert record["medications"] == "Amoxicillin 250mg twice daily"
+
+
+@pytest.mark.asyncio
+async def test_file_prescription_document_forwards_file_and_files_record(monkeypatch):
+    """Vet used the external prescription-generator tool (or photographed a
+    written prescription) instead of typing it out — the resulting file
+    should be forwarded to the household as an attachment, not just filed
+    silently, and the session's awaiting_from should clear same as
+    file_prescription."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "completed",
+                    "awaiting_from": "doctor_prescription",
+                    "case_summary": "Coughing for 2 days",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    ctx.whatsapp.send_image = AsyncMock()
+    ctx.whatsapp.send_document = AsyncMock()
+    agent_ctx = SimpleNamespace(
+        profile={"id": "profile-1", "phone_number": "919876543210"},
+        pets=[],
+        pending_media=SimpleNamespace(document_bytes=b"fake-pdf-bytes", document_mime_type="application/pdf", media_context="handwritten prescription"),
+    )
+    monkeypatch.setattr("app.agent.tools.booking.upload_to_storage", lambda *a, **k: None)
+    monkeypatch.setattr("app.agent.tools.booking.sign_storage_url", lambda *a, **k: "https://signed.example/prescription.pdf")
+
+    result = await file_prescription_document(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is True
+    ctx.whatsapp.send_document.assert_awaited_once_with("919876543210", "https://signed.example/prescription.pdf", "prescription.pdf", "Prescription for Max from Dr. Rao")
+    ctx.whatsapp.send_image.assert_not_awaited()
+
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["awaiting_from"] is None
+
+    doc = supabase.rows("documents")[0]
+    assert doc["document_type"] == "Prescription"
+    assert doc["pet_id"] == "pet-a"
+
+    record = supabase.rows("medical_records")[0]
+    assert record["pet_id"] == "pet-a"
+    assert record["created_by"] == "vet"
+
+
+@pytest.mark.asyncio
+async def test_file_prescription_document_sends_image_when_mime_is_image(monkeypatch):
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "completed", "awaiting_from": "doctor_prescription"}
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    ctx.whatsapp.send_image = AsyncMock()
+    ctx.whatsapp.send_document = AsyncMock()
+    agent_ctx = SimpleNamespace(
+        profile={"id": "profile-1", "phone_number": "919876543210"},
+        pets=[],
+        pending_media=SimpleNamespace(document_bytes=b"fake-jpg-bytes", document_mime_type="image/jpeg", media_context="photo of a written prescription"),
+    )
+    monkeypatch.setattr("app.agent.tools.booking.upload_to_storage", lambda *a, **k: None)
+    monkeypatch.setattr("app.agent.tools.booking.sign_storage_url", lambda *a, **k: "https://signed.example/prescription.jpg")
+
+    result = await file_prescription_document(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is True
+    ctx.whatsapp.send_image.assert_awaited_once_with("919876543210", "https://signed.example/prescription.jpg", "Prescription for Max from Dr. Rao")
+    ctx.whatsapp.send_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_file_prescription_document_requires_pending_media():
+    ctx = _make_ctx(FakeSupabaseClient())
+    agent_ctx = _make_agent_ctx(pets=[])  # no pending_media attribute
+
+    result = await file_prescription_document(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is False
+    assert result["error"] == "no_pending_media"
 
 
 @pytest.mark.asyncio
@@ -398,7 +500,8 @@ async def test_session_notifications_broadcast_to_every_household_member():
 
     assert result["success"] is True
     notified_phones = {call.args[0] for call in ctx.whatsapp.send_text.call_args_list}
-    assert notified_phones == {"919876543210", "919111111111"}
+    # 919000000001 is the doctor getting the prescription-generator link, not a household notice.
+    assert notified_phones == {"919876543210", "919111111111", "919000000001"}
 
 
 @pytest.mark.asyncio

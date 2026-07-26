@@ -22,13 +22,14 @@ from app.availability.slots import IST, compute_doctor_slots
 from app.deps import AppContext
 from app.ingestion.context import AgentContext
 from app.integrations import google_calendar, razorpay_client
-from app.integrations.supabase_client import get_pet_member_contacts
+from app.integrations.supabase_client import get_pet_member_contacts, sign_storage_url, upload_to_storage
 from app.utils.pet_resolution import AMBIGUOUS_PET, resolve_pet
 
 logger = logging.getLogger(__name__)
 
 MAX_DOCTORS_LISTED = 9
 SESSION_DURATION_MINUTES = 30
+PRESCRIPTION_GENERATOR_URL = "https://www.infyways.com/tools/prescription-generator/"
 
 
 def _get_session(client, session_id: str) -> dict[str, Any] | None:
@@ -48,15 +49,13 @@ def _get_pet(client, pet_id: str) -> dict[str, Any] | None:
     return resp.data[0] if resp.data else None
 
 
-async def _notify_household(ctx: AppContext, session: dict[str, Any], message: str) -> None:
-    """Session notifications (confirmed/rescheduled/cancelled/prescription)
-    go to EVERY member of the pet's household (owner/family/caregiver), not
+def _household_phones(client, session: dict[str, Any]) -> set[str]:
+    """Every member of the pet's household (owner/family/caregiver), not
     just whichever one happens to be driving the current WhatsApp
     conversation — a session concerning the pet is everyone's business.
     Falls back to just the acting profile if the pet has no members on file
     (e.g. pet_id missing on an older session) so a notification never
     silently goes nowhere."""
-    client = ctx.supabase
     pet_id = session.get("pet_id")
     phones: set[str] = set()
     if pet_id:
@@ -65,7 +64,11 @@ async def _notify_household(ctx: AppContext, session: dict[str, Any], message: s
         profile = _get_profile(client, session["profile_id"])
         if profile:
             phones = {profile["phone_number"]}
-    for phone in phones:
+    return phones
+
+
+async def _notify_household(ctx: AppContext, session: dict[str, Any], message: str) -> None:
+    for phone in _household_phones(ctx.supabase, session):
         try:
             await ctx.whatsapp.send_text(phone, message)
         except Exception:
@@ -645,7 +648,25 @@ async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id
         "prescription/treatment notes shortly.",
     )
 
-    return {"success": True, "mode": "session_completed", "instruction_to_llm": "Ask the vet for the prescription/treatment notes, then call file_prescription."}
+    doctor_phone = session.get("doctor_phone")
+    if doctor_phone:
+        try:
+            await ctx.whatsapp.send_text(
+                doctor_phone,
+                f"Session with {pet_name}'s owner is now marked done. You can either type the "
+                "medications/treatment plan here, or use this prescription generator to create a "
+                "formatted document, then send me the resulting file (or your saved link) here and "
+                f"I'll forward it to the pet parent:\n{PRESCRIPTION_GENERATOR_URL}",
+            )
+        except Exception:
+            logger.exception("Failed to send prescription-generator link to doctor %s for session %s", doctor_phone, session_id)
+
+    return {
+        "success": True,
+        "mode": "session_completed",
+        "instruction_to_llm": "Ask the vet for the prescription/treatment notes, then call file_prescription — "
+        "or, if they instead send back a document/image, call file_prescription_document.",
+    }
 
 
 async def file_prescription(
@@ -687,6 +708,92 @@ async def file_prescription(
         "mode": "prescription_filed",
         "session_id": session_id,
         "instruction_to_llm": "The session summary was already sent to the customer as a WhatsApp message — just confirm briefly to the vet, don't restate its contents.",
+    }
+
+
+async def file_prescription_document(
+    ctx: AppContext, agent_ctx: AgentContext, session_id: str, medications: str = "", treatment_plan: str = ""
+) -> dict[str, Any]:
+    """The vet used the external prescription-generator tool (or just
+    photographed/scanned a written prescription) and sent the resulting
+    file back instead of typing medications out — forward that exact file
+    to the household as the prescription, and still write the same
+    medical_records row file_prescription does so a formatted document
+    doesn't lose the structured history a typed prescription would keep."""
+    media = getattr(agent_ctx, "pending_media", None)
+    if not media or not media.document_bytes:
+        return {"success": False, "error": "no_pending_media", "message": "There's no prescription file from this turn to file."}
+
+    client = ctx.supabase
+    session = _get_session(client, session_id)
+    if not session:
+        return {"success": False, "error": "session_not_found"}
+
+    client.table("medical_records").insert(
+        {
+            "pet_id": session.get("pet_id"),
+            "profile_id": session["profile_id"],
+            "visit_date": datetime.now(tz=IST).date().isoformat(),
+            "chief_complaint": session.get("case_summary"),
+            "medications": medications or None,
+            "treatment_plan": treatment_plan or None,
+            "created_by": "vet",
+        }
+    ).execute()
+
+    client.table("doctor_sessions").update({"awaiting_from": None}).eq("id", session_id).execute()
+
+    pet = _get_pet(client, session.get("pet_id"))
+    pet_name = (pet.get("name") if pet else None) or "your pet"
+    doctor_name = _doctor_name(client, session.get("doctor_phone"))
+
+    ext = (media.document_mime_type or "").split("/")[-1] or "bin"
+    object_path = f"{session.get('pet_id') or 'unassigned'}/{int(datetime.now(tz=IST).timestamp())}-prescription.{ext}"
+    storage_path = f"medical-documents/{object_path}"
+    upload_to_storage(client, "medical-documents", object_path, media.document_bytes, media.document_mime_type or "application/octet-stream")
+    signed_url = sign_storage_url(client, "medical-documents", object_path)
+
+    client.table("documents").insert(
+        {
+            "pet_id": session.get("pet_id"),
+            "profile_id": session["profile_id"],
+            "document_name": f"Prescription - {pet_name}",
+            "document_type": "Prescription",
+            "storage_path": storage_path,
+            "mime_type": media.document_mime_type,
+            "ocr_text": media.media_context,
+            "ai_summary": (media.media_context or "")[:400],
+            "is_verified": True,
+        }
+    ).execute()
+
+    caption = f"Prescription for {pet_name} from {doctor_name}"
+    is_image = (media.document_mime_type or "").startswith("image/")
+    for phone in _household_phones(client, session):
+        try:
+            if is_image:
+                await ctx.whatsapp.send_image(phone, signed_url, caption)
+            else:
+                await ctx.whatsapp.send_document(phone, signed_url, f"prescription.{ext}", caption)
+        except Exception:
+            logger.exception("Failed to forward prescription document to %s for session %s", phone, session_id)
+
+    if medications or treatment_plan:
+        summary_lines = [f"*Session summary — {pet_name} with {doctor_name}*"]
+        if session.get("case_summary"):
+            summary_lines.append(f"Reason for visit: {session['case_summary']}")
+        if medications:
+            summary_lines.append(f"Medications: {medications}")
+        if treatment_plan:
+            summary_lines.append(f"Treatment plan: {treatment_plan}")
+        await _notify_household(ctx, session, "\n".join(summary_lines))
+
+    return {
+        "success": True,
+        "mode": "prescription_document_filed",
+        "session_id": session_id,
+        "instruction_to_llm": "The prescription file was already forwarded to the pet parent as a WhatsApp "
+        "attachment — just confirm briefly to the vet, don't restate its contents.",
     }
 
 
