@@ -96,7 +96,7 @@ async def test_agent_calls_the_tool_the_model_picks_then_stops(monkeypatch):
         supabase=_make_supabase_mock(),
         openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx()
+    agent_ctx = _make_agent_ctx(is_subscriber=True)  # check_symptoms is subscriber_only
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.1",
         timestamp="1700000000", message_type="text", text="Rex has been vomiting",
@@ -248,5 +248,55 @@ async def test_free_customer_blocked_from_subscriber_only_tool_with_upsell(monke
     result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
 
     assert tool_calls_made == []  # the real tool must never have been called
+    assert result == "That's a Subscriber feature — want the subscribe link?"
+    ctx.whatsapp.send_reply_and_chunk.assert_awaited_once_with("919876543210", result)
+
+
+@pytest.mark.asyncio
+async def test_free_customer_blocked_from_check_symptoms_with_upsell(monkeypatch):
+    """The structured triage tool (check_symptoms) is now Subscriber-only --
+    a Free customer reporting a new symptom must never reach the real
+    triage call; the orchestrator should short-circuit with a
+    subscriber_only_feature error instead."""
+    tool_calls_made = []
+
+    async def fake_tool(ctx, agent_ctx, **kwargs):
+        tool_calls_made.append(kwargs)
+        return {"success": True, "severity": 4}
+
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [{"type": "function", "function": {"name": "check_symptoms"}}])
+    monkeypatch.setattr(orchestrator, "get_tool_fn", lambda name: fake_tool)
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+
+    responses = [
+        _fake_response(None, [_fake_tool_call("call-1", "check_symptoms", {"symptoms": "vomiting"})]),
+        _fake_response("That's a Subscriber feature — want the subscribe link?", None),
+    ]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings,
+        http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
+        supabase=_make_supabase_mock(),
+        openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=False)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.5",
+        timestamp="1700000004", message_type="text", text="Rex has been vomiting",
+    )
+
+    result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    assert tool_calls_made == []
     assert result == "That's a Subscriber feature — want the subscribe link?"
     ctx.whatsapp.send_reply_and_chunk.assert_awaited_once_with("919876543210", result)

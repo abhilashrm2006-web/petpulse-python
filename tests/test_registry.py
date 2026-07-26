@@ -15,7 +15,12 @@ def test_subscriber_only_tool_allowed_for_subscriber():
 
 
 def test_non_gated_tool_allowed_for_free_customer():
-    assert is_tool_allowed_for_tier("check_symptoms", "customer", is_subscriber=False) is True
+    assert is_tool_allowed_for_tier("save_onboarding_field", "customer", is_subscriber=False) is True
+
+
+def test_check_symptoms_is_subscriber_only():
+    assert is_tool_allowed_for_tier("check_symptoms", "customer", is_subscriber=False) is False
+    assert is_tool_allowed_for_tier("check_symptoms", "customer", is_subscriber=True) is True
 
 
 def test_vet_is_never_restricted_by_tier_even_for_gated_tools():
