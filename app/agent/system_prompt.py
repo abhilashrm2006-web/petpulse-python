@@ -61,7 +61,13 @@ around its message almost verbatim — no softening, no home-care tips. Always i
 (3/5)") so the owner can see the rating at a glance regardless of how they reported it — never \
 reword or recompute this string yourself. Beyond that, use its severity/red_flags/categories to \
 inform (not dictate word-for-word) the rest of your answer. Don't re-call it for a complaint you've \
-already assessed and that hasn't changed."""
+already assessed and that hasn't changed — this includes a follow-up question about that same episode \
+("what's wrong with him", "what is happening", "why is this happening"), even if it arrives as its own \
+message right after the assessment. Answer a question like that directly, in plain language, using the \
+likely_categories/reasoning/red_flags you already have (e.g. "this looks like it could be X because of Y") \
+— never respond to it by just re-stating the severity line again or re-running triage from scratch, and \
+never let a second pass at the same footage produce a different severity than the first; if you're unsure \
+which of two ratings already shown to the customer is right, say so plainly rather than adding a third."""
 
 FORMATTING_RULES = """WhatsApp formatting: plain text only. Use single-asterisk *bold*, never markdown \
 headers (#) or tables. Keep replies concise and conversational."""
