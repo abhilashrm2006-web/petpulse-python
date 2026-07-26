@@ -42,6 +42,10 @@ class _FakeQuery:
         self._payload = payload
         return self
 
+    def delete(self):
+        self._op = "delete"
+        return self
+
     def eq(self, col, val):
         self._filters.append((col, "eq", val))
         return self
@@ -107,6 +111,12 @@ class _FakeQuery:
                     row.update(self._payload)
                     updated.append(row)
             return _FakeResult(updated)
+
+        if self._op == "delete":
+            deleted = [row for row in table if self._matches(row)]
+            remaining = [row for row in table if not self._matches(row)]
+            table[:] = remaining
+            return _FakeResult(deleted)
 
         # select
         matched = [row for row in table if self._matches(row)]

@@ -18,6 +18,7 @@ from app.deps import AppContext
 from app.ingestion.context import build_context
 from app.ingestion.dedup import claim
 from app.ingestion.media import process_media
+from app.ingestion.registration import handle_registration, handle_subscription_webhook
 from app.ingestion.webhook import extract_message, extract_status_update, verify_webhook_challenge
 from app.integrations import razorpay_client
 from app.integrations.openai_client import make_openai_client
@@ -103,6 +104,9 @@ async def receive_webhook(request: Request) -> Response:
         return Response(status_code=200)  # duplicate delivery, already processed
 
     try:
+        if await handle_registration(ctx, extracted):
+            return Response(status_code=200)  # brand-new/mid-registration number — wizard handled it, no agent turn
+
         agent_ctx = await build_context(ctx.supabase, extracted)
 
         media_context = ""
@@ -134,11 +138,15 @@ async def receive_razorpay_webhook(request: Request) -> Response:
         return Response(status_code=403)
 
     body = await request.json()
-    logger.info("Received Razorpay webhook event=%s", body.get("event"))
+    event = body.get("event", "")
+    logger.info("Received Razorpay webhook event=%s", event)
     try:
-        handled = await handle_payment_webhook(ctx, body)
+        if event.startswith("subscription."):
+            handled = await handle_subscription_webhook(ctx, body)
+        else:
+            handled = await handle_payment_webhook(ctx, body)
         if not handled:
-            logger.warning("Razorpay webhook event=%s was not acted on (see handle_payment_webhook logs for why)", body.get("event"))
+            logger.warning("Razorpay webhook event=%s was not acted on (see handler logs for why)", event)
     except Exception:
         logger.exception("Failed to process Razorpay webhook event")
 

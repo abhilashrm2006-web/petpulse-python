@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     razorpay_webhook_secret: str = ""
     razorpay_consult_fee_inr: int = 399
 
+    # Razorpay Subscriptions (Subscriber membership tier, ₹399/month — see
+    # app/ingestion/registration.py). Plan created once via the API; this is
+    # its id, not a per-customer value.
+    razorpay_subscription_plan_id: str = "plan_TIFJusQ5szdoE2"
+
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 
