@@ -682,6 +682,18 @@ def _doctor_name(client, doctor_phone: str | None) -> str:
     return (rows[0].get("full_name") if rows else None) or "your vet"
 
 
+def _get_doctor_profile(client, doctor_phone: str | None) -> dict[str, Any]:
+    """Full profile row for the treating vet, used to fill in the editable
+    per-doctor fields on the prescription PDF (name/qualification/contact).
+    `registration_number` isn't a column on `profiles` yet -- this degrades
+    to "Not on file" on the PDF until that column is added, rather than
+    erroring."""
+    if not doctor_phone:
+        return {}
+    rows = client.table("profiles").select("*").eq("phone_number", doctor_phone).limit(1).execute().data
+    return rows[0] if rows else {}
+
+
 async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id: str) -> dict[str, Any]:
     client = ctx.supabase
     session = _get_session(client, session_id)
@@ -759,9 +771,13 @@ async def _send_prescription_pdf(
     sent or fail the whole tool call — log and move on."""
     client = ctx.supabase
     try:
+        doctor_profile = _get_doctor_profile(client, session.get("doctor_phone"))
         pdf_bytes = build_prescription_pdf(
             pet_name=pet_name,
             doctor_name=doctor_name,
+            doctor_qualification=doctor_profile.get("qualification") or "",
+            doctor_registration_number=doctor_profile.get("registration_number") or "",
+            doctor_phone=doctor_profile.get("phone_number") or session.get("doctor_phone") or "",
             date_str=datetime.now(tz=IST).strftime("%d %b %Y"),
             reason=session.get("case_summary", ""),
             medications=medications,

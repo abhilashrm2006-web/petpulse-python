@@ -368,6 +368,60 @@ async def test_file_prescription_also_sends_a_pdf_copy(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_prescription_pdf_uses_the_treating_vets_own_profile_fields(monkeypatch):
+    """Doctor name/qualification/registration/contact on the PDF are
+    per-consultation, sourced from the treating vet's own profile row —
+    not hardcoded clinic-wide values."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "completed",
+                    "case_summary": "Coughing for 2 days",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {
+                    "id": "vet-1",
+                    "phone_number": "919000000001",
+                    "full_name": "Dr. Rao",
+                    "role": "vet",
+                    "qualification": "BVSc & AH, MVSc (Surgery)",
+                    "registration_number": "TNVC-2024-00123",
+                },
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    ctx.whatsapp.send_document = AsyncMock()
+    monkeypatch.setattr("app.agent.tools.booking.upload_to_storage", lambda *a, **k: None)
+    monkeypatch.setattr("app.agent.tools.booking.sign_storage_url", lambda *a, **k: "https://signed.example/prescription.pdf")
+    captured = {}
+
+    def fake_build_prescription_pdf(**kwargs):
+        captured.update(kwargs)
+        return b"%PDF-1.3 fake"
+
+    monkeypatch.setattr("app.agent.tools.booking.build_prescription_pdf", fake_build_prescription_pdf)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await file_prescription(
+        ctx, agent_ctx, session_id="session-a", medications="Amoxicillin 250mg twice daily", treatment_plan="Rest for 5 days"
+    )
+
+    assert result["success"] is True
+    assert captured["doctor_qualification"] == "BVSc & AH, MVSc (Surgery)"
+    assert captured["doctor_registration_number"] == "TNVC-2024-00123"
+    assert captured["doctor_phone"] == "919000000001"
+
+
+@pytest.mark.asyncio
 async def test_file_prescription_succeeds_even_if_pdf_generation_fails(monkeypatch):
     """The PDF is a best-effort extra on top of the text summary already
     sent — a storage/rendering failure must never fail the tool call or
