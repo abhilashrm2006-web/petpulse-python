@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.tools.onboarding import save_onboarding_field
+from app.agent.tools.onboarding import _normalize_value, save_onboarding_field
 from tests.fake_supabase import FakeSupabaseClient
 
 
@@ -98,3 +98,19 @@ async def test_gender_field_is_supported_and_normalized():
     assert result["success"] is True
     assert result["savedValue"] == "Female"
     assert agent_ctx.pets[0]["gender"] == "Female"
+
+
+@pytest.mark.parametrize(
+    "spoken,expected",
+    [
+        ("1.5 years", 2),
+        ("2.5 years", 3),
+        ("3.5 years", 4),
+        ("2 years", 2),
+    ],
+)
+def test_age_rounds_half_up_consistently(spoken, expected):
+    """Audit bug: plain round() uses round-half-to-even, so "2.5" used to
+    round DOWN to 2 while "1.5"/"3.5" rounded up -- inconsistent behavior a
+    user would never expect for their own pet's age."""
+    assert _normalize_value("age", spoken) == expected

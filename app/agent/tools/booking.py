@@ -24,6 +24,7 @@ from app.ingestion.context import AgentContext
 from app.integrations import google_calendar, razorpay_client
 from app.integrations.openai_client import text_completion
 from app.integrations.prescription_pdf import build_prescription_pdf
+from app.media_pipeline.classify import DEFAULT_BUCKET, LABEL_TO_BUCKET
 from app.integrations.supabase_client import get_pet_member_contacts, sign_storage_url, upload_to_storage
 from app.utils.pet_resolution import AMBIGUOUS_PET, resolve_pet
 
@@ -846,9 +847,10 @@ async def _send_prescription_pdf(
             medications=medications,
             treatment_plan=treatment_plan,
         )
+        bucket = LABEL_TO_BUCKET.get("Prescription", DEFAULT_BUCKET)
         object_path = f"{session.get('pet_id') or 'unassigned'}/{int(datetime.now(tz=IST).timestamp())}-prescription.pdf"
-        upload_to_storage(client, "medical-documents", object_path, pdf_bytes, "application/pdf")
-        signed_url = sign_storage_url(client, "medical-documents", object_path)
+        upload_to_storage(client, bucket, object_path, pdf_bytes, "application/pdf")
+        signed_url = sign_storage_url(client, bucket, object_path)
 
         client.table("documents").insert(
             {
@@ -856,7 +858,7 @@ async def _send_prescription_pdf(
                 "profile_id": session["profile_id"],
                 "document_name": f"Prescription - {pet_name}",
                 "document_type": "Prescription",
-                "storage_path": f"medical-documents/{object_path}",
+                "storage_path": f"{bucket}/{object_path}",
                 "mime_type": "application/pdf",
                 "is_verified": True,
             }

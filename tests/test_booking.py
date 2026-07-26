@@ -354,6 +354,9 @@ async def test_deliver_prescription_sends_pdf_when_chosen(monkeypatch):
     doc = supabase.rows("documents")[0]
     assert doc["document_type"] == "Prescription"
     assert doc["pet_id"] == "pet-a"
+    # Audit bug: this used to hardcode "medical-documents" instead of reusing
+    # media_pipeline.classify's own LABEL_TO_BUCKET convention for "Prescription".
+    assert doc["storage_path"].startswith("prescriptions/")
 
 
 @pytest.mark.asyncio

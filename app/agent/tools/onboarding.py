@@ -1,6 +1,7 @@
 """Ports `Va6xq5ZLATsTqrXK` — Onboarding Field Saver / `save_onboarding_field`
 (spec §3.1)."""
 
+import math
 import re
 from datetime import date, datetime
 from typing import Any
@@ -44,7 +45,10 @@ def _normalize_value(field: str, value: str) -> Any:
         return value.lower()
     if field == "age":
         match = re.search(r"[\d.]+", value)
-        return round(float(match.group())) if match else None
+        # round() uses round-half-to-even (round(2.5) == 2 but round(1.5) == 2
+        # and round(3.5) == 4) -- surprising, inconsistent behavior for a
+        # user-facing age. floor(x + 0.5) always rounds .5 up.
+        return math.floor(float(match.group()) + 0.5) if match else None
     if field == "weight":
         match = re.search(r"[\d.]+", value)
         if not match:
