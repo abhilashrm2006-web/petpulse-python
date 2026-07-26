@@ -58,6 +58,10 @@ class _FakeQuery:
         self._filters.append((col, "gte", val))
         return self
 
+    def lte(self, col, val):
+        self._filters.append((col, "lte", val))
+        return self
+
     def in_(self, col, vals):
         self._filters.append((col, "in", vals))
         return self
@@ -81,6 +85,8 @@ class _FakeQuery:
             if op == "neq" and row_val == val:
                 return False
             if op == "gte" and (row_val is None or row_val < val):
+                return False
+            if op == "lte" and (row_val is None or row_val > val):
                 return False
             if op == "in" and row_val not in val:
                 return False

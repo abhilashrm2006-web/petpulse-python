@@ -8,7 +8,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 from app.deps import AppContext
-from app.integrations.supabase_client import is_active_subscriber
+from app.integrations.supabase_client import get_pet_member_contacts, is_active_subscriber
 
 logger = logging.getLogger(__name__)
 
@@ -31,20 +31,17 @@ async def send_vaccination_reminders(ctx: AppContext) -> None:
 
     for vax in due:
         pet = vax.get("pets") or {}
-        members = (
-            client.table("pet_members")
-            .select("profile_id, profiles(phone_number)")
-            .eq("pet_id", vax["pet_id"])
-            .execute()
-            .data
-            or []
-        )
+        # pet_members has two FKs into profiles (profile_id and added_by) --
+        # get_pet_member_contacts already disambiguates that embed correctly
+        # (confirmed live); the raw query this used to run here doesn't and
+        # made this entire job crash for every vaccination.
+        members = get_pet_member_contacts(client, vax["pet_id"])
         overdue = vax.get("next_due_date") and vax["next_due_date"] < today
         status_word = "overdue" if overdue else "due soon"
         text = f"Reminder: {pet.get('name', 'Your pet')}'s {vax['vaccine_name']} vaccination is {status_word} ({vax.get('next_due_date')})."
 
         for member in members:
-            phone = (member.get("profiles") or {}).get("phone_number")
+            phone = member.get("phone_number")
             profile_id = member.get("profile_id")
             # Pet Vaccination Tracker (the passport + these prorata reminders) is a
             # Subscriber-only feature -- a Free member on file for this pet just
