@@ -17,6 +17,8 @@ from app.utils.formatting import split_into_chunks, to_whatsapp_markdown
 logger = logging.getLogger(__name__)
 
 CHUNK_DELAY_SECONDS = 0.6
+SEND_MAX_ATTEMPTS = 3
+SEND_RETRY_BACKOFF_SECONDS = 1.0
 
 
 class WhatsAppClient:
@@ -27,11 +29,33 @@ class WhatsAppClient:
         self._headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
 
     async def _post(self, payload: dict) -> dict:
-        resp = await self._http.post(f"{self._base}/messages", headers=self._headers, json=payload)
-        if resp.is_error:
-            logger.error("WhatsApp Graph API %s error for %s: %s", resp.status_code, payload.get("type"), resp.text)
-        resp.raise_for_status()
-        return resp.json()
+        """Confirmed live: a booking's doctor-assignment notice (case details
+        + Meet link) went missing with nothing but a caught-and-logged
+        exception to show for it — a transient Graph API hiccup on that one
+        send, gone for good with no retry. Retries only network-level
+        failures and 5xx responses, exactly like the Calendar Bridge client;
+        a 4xx (invalid number, expired 24h messaging window, bad payload) is
+        never transient, so those raise immediately instead of wasting
+        attempts."""
+        last_exc: Exception | None = None
+        for attempt in range(1, SEND_MAX_ATTEMPTS + 1):
+            try:
+                resp = await self._http.post(f"{self._base}/messages", headers=self._headers, json=payload)
+                if resp.is_error:
+                    logger.error("WhatsApp Graph API %s error for %s: %s", resp.status_code, payload.get("type"), resp.text)
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.TransportError as exc:
+                last_exc = exc
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code < 500:
+                    raise
+                last_exc = exc
+
+            if attempt < SEND_MAX_ATTEMPTS:
+                logger.warning("WhatsApp send retrying (attempt %d/%d) after: %s", attempt, SEND_MAX_ATTEMPTS, last_exc)
+                await asyncio.sleep(SEND_RETRY_BACKOFF_SECONDS * attempt)
+        raise last_exc
 
     async def send_text(self, to: str, body: str) -> dict:
         return await self._post({"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": body}})
