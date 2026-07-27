@@ -78,14 +78,38 @@ async def _cancel_active_subscription(ctx: AppContext, profile_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 @router.get("/customers")
-async def list_customers(request: Request, search: str = "", limit: int = 50, offset: int = 0) -> dict[str, Any]:
+async def list_customers(
+    request: Request,
+    search: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
     ctx = _ctx(request)
     query = ctx.supabase.table("profiles").select("*").eq("role", "customer")
     if search:
         pattern = f"%{search}%"
         query = query.or_(f"full_name.ilike.{pattern},phone_number.ilike.{pattern},email.ilike.{pattern}")
+    if date_from:
+        query = query.gte("created_at", date_from)
+    if date_to:
+        # Inclusive of the whole "to" day -- a bare date string sorts before
+        # any timestamp on that same day, so a plain lte would exclude it.
+        query = query.lte("created_at", f"{date_to}T23:59:59")
     rows = query.order("created_at", desc=True).limit(limit).execute().data or []
-    return {"customers": rows[offset:offset + limit] if offset else rows, "count": len(rows)}
+    rows = rows[offset:offset + limit] if offset else rows
+
+    profile_ids = [r["id"] for r in rows]
+    pets_by_profile: dict[str, list[dict[str, Any]]] = {}
+    if profile_ids:
+        pet_rows = ctx.supabase.table("pets").select("*").in_("profile_id", profile_ids).order("created_at").execute().data or []
+        for pet in pet_rows:
+            pets_by_profile.setdefault(pet["profile_id"], []).append(pet)
+    for row in rows:
+        row["pets"] = pets_by_profile.get(row["id"], [])
+
+    return {"customers": rows, "count": len(rows)}
 
 
 @router.get("/customers/{profile_id}")
@@ -115,6 +139,21 @@ async def get_customer(profile_id: str, request: Request) -> dict[str, Any]:
         "recent_sessions": sessions,
         "document_count": document_count,
     }
+
+
+@router.post("/customers/{profile_id}/activate")
+async def activate_customer(profile_id: str, request: Request) -> dict[str, Any]:
+    """Reverses deactivate -- just the flag. Doesn't restore the cancelled
+    subscription/sessions from a prior deactivate (those are gone for real,
+    same as any other cancellation); this is for un-suspending an account,
+    not undoing history."""
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("profiles").select("id").eq("id", profile_id).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    ctx.supabase.table("profiles").update({"is_active": True}).eq("id", profile_id).execute()
+    return {"success": True}
 
 
 @router.post("/customers/{profile_id}/deactivate")

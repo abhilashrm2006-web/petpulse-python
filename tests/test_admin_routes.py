@@ -46,6 +46,70 @@ async def test_list_customers_filters_by_role_and_search():
 
 
 @pytest.mark.asyncio
+async def test_list_customers_includes_each_customers_pets():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "Jane", "phone_number": "919000000001", "created_at": "2026-01-01"},
+                {"id": "c2", "role": "customer", "full_name": "Bob", "phone_number": "919000000002", "created_at": "2026-01-02"},
+            ],
+            "pets": [
+                {"id": "p1", "profile_id": "c1", "name": "Rex", "breed": "Labrador", "date_of_birth": "2022-01-01", "created_at": "2026-01-01"},
+                {"id": "p2", "profile_id": "c1", "name": "Milo", "breed": "Persian", "date_of_birth": "2023-01-01", "created_at": "2026-01-02"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request)
+
+    by_id = {c["id"]: c for c in result["customers"]}
+    assert len(by_id["c1"]["pets"]) == 2
+    assert by_id["c1"]["pets"][0]["name"] == "Rex"
+    assert by_id["c2"]["pets"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_customers_filters_by_date_range():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "Old", "phone_number": "919000000001", "created_at": "2026-01-01T00:00:00"},
+                {"id": "c2", "role": "customer", "full_name": "Mid", "phone_number": "919000000002", "created_at": "2026-06-15T00:00:00"},
+                {"id": "c3", "role": "customer", "full_name": "New", "phone_number": "919000000003", "created_at": "2026-12-01T00:00:00"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request, date_from="2026-06-01", date_to="2026-06-30")
+
+    assert result["count"] == 1
+    assert result["customers"][0]["id"] == "c2"
+
+
+@pytest.mark.asyncio
+async def test_activate_customer_flips_is_active_true():
+    supabase = FakeSupabaseClient(initial={"profiles": [{"id": "c1", "role": "customer", "is_active": False}]})
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.activate_customer("c1", request)
+
+    assert result["success"] is True
+    assert supabase.rows("profiles")[0]["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_activate_customer_404_when_missing():
+    supabase = FakeSupabaseClient()
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.activate_customer("nope", request)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_get_customer_detail_includes_pets_subscription_and_documents():
     supabase = FakeSupabaseClient(
         initial={
