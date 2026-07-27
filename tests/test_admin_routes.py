@@ -116,6 +116,35 @@ async def test_delete_customer_removes_the_row(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_delete_customer_purges_no_action_fk_references():
+    """Regression test for a real live failure: deleting a customer with
+    any doctor_sessions history 500'd with a Postgres FK violation, since
+    doctor_sessions.profile_id (and 3 other tables) are ON DELETE NO ACTION,
+    not CASCADE. All four must be cleared before the profile row itself is
+    deleted, not just the ones that already have their own cancel/notify
+    logic (doctor_sessions)."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [{"id": "c1", "role": "customer", "phone_number": "919000000001"}],
+            "doctor_sessions": [{"id": "sess1", "profile_id": "c1", "status": "completed", "doctor_phone": "919000000099"}],
+            "new_parent_followups": [{"id": "f1", "profile_id": "c1"}],
+            "new_parent_guides": [{"id": "g1", "profile_id": "c1"}],
+            "pet_members": [{"pet_id": "p1", "profile_id": "other-profile", "added_by": "c1"}],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.delete_customer("c1", request)
+
+    assert result["success"] is True
+    assert supabase.rows("profiles") == []
+    assert supabase.rows("doctor_sessions") == []
+    assert supabase.rows("new_parent_followups") == []
+    assert supabase.rows("new_parent_guides") == []
+    assert supabase.rows("pet_members") == []
+
+
+@pytest.mark.asyncio
 async def test_onboard_doctor_creates_a_vet_profile():
     supabase = FakeSupabaseClient()
     request = _fake_request(_make_ctx(supabase))

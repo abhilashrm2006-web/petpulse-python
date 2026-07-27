@@ -23,6 +23,20 @@ router = APIRouter()
 ACTIVE_SESSION_STATUSES = ["pending", "negotiating", "accepted"]
 
 
+async def _purge_blocking_references(ctx: AppContext, profile_id: str) -> None:
+    """A hard delete of a profile hits real FK constraints that don't
+    cascade automatically (confirmed live: deleting a customer with any
+    session history 500'd with a doctor_sessions FK violation). Most
+    tables referencing profiles.id are ON DELETE CASCADE/SET NULL, but
+    four are NO ACTION and must be cleared explicitly first, in any order
+    (none of them reference each other)."""
+    client = ctx.supabase
+    client.table("doctor_sessions").delete().eq("profile_id", profile_id).execute()
+    client.table("new_parent_followups").delete().eq("profile_id", profile_id).execute()
+    client.table("new_parent_guides").delete().eq("profile_id", profile_id).execute()
+    client.table("pet_members").delete().eq("added_by", profile_id).execute()
+
+
 def _ctx(request: Request) -> AppContext:
     return request.app.state.ctx
 
@@ -126,6 +140,7 @@ async def delete_customer(profile_id: str, request: Request) -> dict[str, Any]:
 
     await _cancel_pending_sessions(ctx, profile_id=profile_id, role="customer")
     await _cancel_active_subscription(ctx, profile_id)
+    await _purge_blocking_references(ctx, profile_id)
     ctx.supabase.table("profiles").delete().eq("id", profile_id).execute()
 
     return {"success": True}
@@ -215,6 +230,7 @@ async def delete_doctor(profile_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Doctor not found")
 
     await _cancel_pending_sessions(ctx, doctor_phone=rows[0]["phone_number"], role="vet")
+    await _purge_blocking_references(ctx, profile_id)
     ctx.supabase.table("profiles").delete().eq("id", profile_id).execute()
 
     return {"success": True}
