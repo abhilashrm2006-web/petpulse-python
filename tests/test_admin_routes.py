@@ -392,7 +392,10 @@ async def test_analytics_overview_computes_expected_counts():
                 {"id": "s2", "status": "active", "amount": 399},
                 {"id": "s3", "status": "cancelled", "amount": 399},
             ],
-            "doctor_sessions": [{"id": "sess1", "status": "accepted", "created_at": today}],
+            "doctor_sessions": [
+                {"id": "sess1", "status": "completed", "created_at": today},
+                {"id": "sess2", "status": "accepted", "created_at": today},
+            ],
             "health_logs": [{"id": "h1", "created_at": today}],
             "documents": [{"id": "d1", "uploaded_at": today}],
         }
@@ -407,10 +410,11 @@ async def test_analytics_overview_computes_expected_counts():
     assert result["founding_members"] == 1
     assert result["standard_subscribers"] == 1
     assert result["estimated_mrr"] == 498
-    assert result["new_signups_this_month"] == 1
-    assert result["consults_this_month"] == 1
-    assert result["symptom_checks_this_month"] == 1
-    assert result["documents_this_month"] == 1
+    assert result["new_signups"] == 1
+    assert result["completed_consultations"] == 1
+    assert result["pending_consultations"] == 1
+    assert result["symptom_checks"] == 1
+    assert result["documents_uploaded"] == 1
 
 
 @pytest.mark.asyncio
@@ -615,3 +619,180 @@ async def test_delete_doctor_document_404_when_missing():
     with pytest.raises(HTTPException) as exc:
         await admin_routes.delete_doctor_document("v1", "nope", request)
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_analytics_overview_counts_completed_not_accepted_in_range():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "created_at": "2026-06-10", "is_founding_member": False},
+            ],
+            "doctor_sessions": [
+                {"id": "s1", "status": "completed", "created_at": "2026-06-05"},
+                {"id": "s2", "status": "accepted", "created_at": "2026-06-06"},
+                {"id": "s3", "status": "cancelled", "created_at": "2026-06-07"},
+                {"id": "s4", "status": "completed", "created_at": "2026-05-01"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.analytics_overview(request, date_from="2026-06-01", date_to="2026-06-30")
+
+    assert result["completed_consultations"] == 1
+    assert result["pending_consultations"] == 1
+    assert result["cancelled_consultations"] == 1
+    assert result["new_signups"] == 1
+    assert result["date_from"] == "2026-06-01"
+    assert result["date_to"] == "2026-06-30"
+
+
+@pytest.mark.asyncio
+async def test_analytics_timeseries_includes_consultations_series():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "s1", "status": "completed", "created_at": "2026-06-05T10:00:00"},
+                {"id": "s2", "status": "completed", "created_at": "2026-06-05T14:00:00"},
+                {"id": "s3", "status": "accepted", "created_at": "2026-06-06T10:00:00"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.analytics_timeseries(request, date_from="2026-06-01", date_to="2026-06-30")
+
+    assert result["consultations"] == [{"date": "2026-06-05", "count": 2}]
+
+
+def _appointment_fixture():
+    return FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "sess-1", "profile_id": "c1", "pet_id": "p1", "doctor_phone": "919000000001",
+                    "status": "completed", "created_at": "2026-06-10T10:00:00", "completed_at": "2026-06-10T10:30:00",
+                    "case_summary": "Skin rash", "pending_medications": "Cream", "awaiting_from": None,
+                    "follow_up_required": True, "follow_up_date": "2026-06-24",
+                },
+                {
+                    "id": "sess-2", "profile_id": "c2", "pet_id": "p2", "doctor_phone": "919000000002",
+                    "status": "completed", "created_at": "2026-06-11T10:00:00", "completed_at": None,
+                    "case_summary": "Vomiting", "pending_medications": None, "awaiting_from": "doctor_prescription",
+                    "follow_up_required": False, "follow_up_date": None,
+                },
+            ],
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "Jane", "city": "Chennai"},
+                {"id": "c2", "role": "customer", "full_name": "Bob", "city": "Bengaluru"},
+                {"id": "v1", "role": "vet", "phone_number": "919000000001", "full_name": "Dr. Rao"},
+                {"id": "v2", "role": "vet", "phone_number": "919000000002", "full_name": "Dr. Iyer"},
+            ],
+            "pets": [
+                {"id": "p1", "name": "Rex", "breed": "Labrador", "age": 2},
+                {"id": "p2", "name": "Milo", "breed": "Persian", "age": 8},
+            ],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_appointments_returns_enriched_fields():
+    supabase = _appointment_fixture()
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_appointments(request)
+
+    assert result["count"] == 2
+    by_id = {a["session_id"]: a for a in result["appointments"]}
+    a1 = by_id["sess-1"]
+    assert a1["customer_id"] == "c1"
+    assert a1["customer_name"] == "Jane"
+    assert a1["pet_name"] == "Rex"
+    assert a1["breed"] == "Labrador"
+    assert a1["age_group"] == "Young (1-2yrs)"
+    assert a1["city"] == "Chennai"
+    assert a1["doctor_name"] == "Dr. Rao"
+    assert a1["prescription_status"] == "Delivered"
+    assert a1["follow_up_required"] is True
+    assert a1["follow_up_date"] == "2026-06-24"
+
+    a2 = by_id["sess-2"]
+    assert a2["prescription_status"] == "Not filed"
+    assert a2["age_group"] == "Senior (7+yrs)"
+
+
+@pytest.mark.asyncio
+async def test_list_appointments_filters_by_breed():
+    supabase = _appointment_fixture()
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_appointments(request, breed="labrador")
+
+    assert result["count"] == 1
+    assert result["appointments"][0]["session_id"] == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_list_appointments_filters_by_age_group():
+    supabase = _appointment_fixture()
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_appointments(request, age_group="Senior (7+yrs)")
+
+    assert result["count"] == 1
+    assert result["appointments"][0]["session_id"] == "sess-2"
+
+
+@pytest.mark.asyncio
+async def test_list_appointments_filters_by_issue():
+    supabase = _appointment_fixture()
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_appointments(request, issue="rash")
+
+    assert result["count"] == 1
+    assert result["appointments"][0]["session_id"] == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_list_appointments_filters_by_city_and_doctor():
+    supabase = _appointment_fixture()
+    request = _fake_request(_make_ctx(supabase))
+
+    assert (await admin_routes.list_appointments(request, city="bengaluru"))["count"] == 1
+    assert (await admin_routes.list_appointments(request, doctor="rao"))["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_appointments_filters_by_follow_up_required():
+    supabase = _appointment_fixture()
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_appointments(request, follow_up_required="true")
+
+    assert result["count"] == 1
+    assert result["appointments"][0]["session_id"] == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_list_appointment_cities():
+    supabase = _appointment_fixture()
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_appointment_cities(request)
+
+    assert result["cities"] == ["Bengaluru", "Chennai"]
+
+
+@pytest.mark.asyncio
+async def test_prescription_status_not_completed_is_na():
+    supabase = FakeSupabaseClient(
+        initial={"doctor_sessions": [{"id": "s1", "profile_id": "c1", "status": "accepted", "created_at": "2026-06-01"}]}
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_appointments(request)
+
+    assert result["appointments"][0]["prescription_status"] == "N/A"

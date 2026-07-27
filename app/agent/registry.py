@@ -289,8 +289,20 @@ TOOL_SPECS: list[ToolSpec] = [
         "file_prescription",
         "File the vet's prescription/treatment notes for a completed session. Does NOT send anything to the "
         "customer yet — it asks them (via WhatsApp buttons) whether they want it as a text message or a PDF, "
-        "and delivery happens once they answer (see deliver_prescription).",
-        {"session_id": _STR, "medications": _STR, "treatment_plan": _STR},
+        "and delivery happens once they answer (see deliver_prescription). Also records whether a follow-up "
+        "visit is needed — if the vet's own message already says so (e.g. 'recheck in 2 weeks', 'no follow-up "
+        "needed'), set follow_up_required/follow_up_date from that directly. If they haven't said either way, "
+        "ask them before calling this tool rather than guessing.",
+        {
+            "session_id": _STR,
+            "medications": _STR,
+            "treatment_plan": _STR,
+            "follow_up_required": {"type": "boolean", "description": "Whether the vet said a follow-up visit is needed. Defaults to false."},
+            "follow_up_date": {
+                "type": "string",
+                "description": "ISO date (YYYY-MM-DD) for the follow-up, only if follow_up_required is true. Omit otherwise.",
+            },
+        },
         ["session_id", "medications"],
         booking.file_prescription,
         VET,

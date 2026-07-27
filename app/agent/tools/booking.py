@@ -174,6 +174,19 @@ def _format_doctor_message(
     return "\n".join(lines)
 
 
+def _normalize_to_date(date_str: str) -> str | None:
+    """Same ambiguity problem as _normalize_to_ist, but for a bare follow-up
+    date (no time component) -- accepts either a plain date or a full
+    timestamp and always returns just the date portion."""
+    if not date_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(date_str)
+    except ValueError:
+        return None
+    return dt.date().isoformat()
+
+
 def _normalize_to_ist(time_str: str) -> str | None:
     """Every write of a customer/vet-supplied time string must go through
     this — an LLM-emitted ISO timestamp with no offset is ambiguous, and
@@ -765,7 +778,9 @@ async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id
         # ended a second time.
         return {"success": True, "mode": "already_completed", "session_id": session_id}
 
-    client.table("doctor_sessions").update({"status": "completed", "awaiting_from": "doctor_prescription"}).eq("id", session_id).execute()
+    client.table("doctor_sessions").update(
+        {"status": "completed", "awaiting_from": "doctor_prescription", "completed_at": datetime.now(tz=IST).isoformat()}
+    ).eq("id", session_id).execute()
 
     pet = _get_pet(client, session.get("pet_id"))
     pet_name = (pet.get("name") if pet else None) or "your pet"
@@ -782,7 +797,13 @@ async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id
 
 
 async def file_prescription(
-    ctx: AppContext, agent_ctx: AgentContext, session_id: str, medications: str, treatment_plan: str = ""
+    ctx: AppContext,
+    agent_ctx: AgentContext,
+    session_id: str,
+    medications: str,
+    treatment_plan: str = "",
+    follow_up_required: bool = False,
+    follow_up_date: str = "",
 ) -> dict[str, Any]:
     """Files the vet's prescription/treatment notes, but does NOT deliver
     them yet — the customer picks text or PDF first (see
@@ -790,11 +811,16 @@ async def file_prescription(
     ask for. medications/treatment_plan are held on the session itself
     (pending_medications/pending_treatment_plan) rather than re-derived
     later from medical_records, so delivery is unambiguous even if the pet
-    has other historical records."""
+    has other historical records. follow_up_required/follow_up_date come
+    straight from whatever the vet said in the same message (see the tool
+    description in registry.py) -- there's no separate WhatsApp question
+    for it."""
     client = ctx.supabase
     session = _get_session(client, session_id)
     if not session:
         return {"success": False, "error": "session_not_found"}
+
+    normalized_follow_up_date = _normalize_to_date(follow_up_date) if follow_up_required else None
 
     client.table("medical_records").insert(
         {
@@ -813,6 +839,8 @@ async def file_prescription(
             "awaiting_from": "prescription_format_choice",
             "pending_medications": medications,
             "pending_treatment_plan": treatment_plan,
+            "follow_up_required": follow_up_required,
+            "follow_up_date": normalized_follow_up_date,
         }
     ).eq("id", session_id).execute()
 

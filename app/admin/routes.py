@@ -492,6 +492,146 @@ async def delete_doctor(profile_id: str, request: Request) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Appointments
+# ---------------------------------------------------------------------------
+
+# pets.age is a rounded-integer year count (see app/agent/tools/onboarding.py),
+# not a DOB -- these buckets bin directly on it rather than computing from date_of_birth.
+AGE_GROUPS: list[tuple[str, Any]] = [
+    ("Puppy/Kitten (<1yr)", lambda age: age < 1),
+    ("Young (1-2yrs)", lambda age: 1 <= age <= 2),
+    ("Adult (3-6yrs)", lambda age: 3 <= age <= 6),
+    ("Senior (7+yrs)", lambda age: age >= 7),
+]
+
+
+def _age_group(age: int | None) -> str:
+    if age is None:
+        return "Unknown"
+    for label, matcher in AGE_GROUPS:
+        if matcher(age):
+            return label
+    return "Unknown"
+
+
+def _prescription_status(session: dict[str, Any]) -> str:
+    """Derived from existing doctor_sessions state -- there's no dedicated
+    delivery-status column (see file_prescription/deliver_prescription in
+    app/agent/tools/booking.py)."""
+    if session.get("status") != "completed":
+        return "N/A"
+    if not session.get("pending_medications"):
+        return "Not filed"
+    if session.get("awaiting_from") == "prescription_format_choice":
+        return "Awaiting delivery choice"
+    return "Delivered"
+
+
+@router.get("/appointments/cities")
+async def list_appointment_cities(request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("profiles").select("city").eq("role", "customer").execute().data or []
+    return {"cities": sorted({r["city"] for r in rows if r.get("city")})}
+
+
+@router.get("/appointments")
+async def list_appointments(
+    request: Request,
+    date_from: str = "",
+    date_to: str = "",
+    breed: str = "",
+    age_group: str = "",
+    issue: str = "",
+    doctor: str = "",
+    city: str = "",
+    status: str = "",
+    follow_up_required: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    ctx = _ctx(request)
+    client = ctx.supabase
+
+    query = client.table("doctor_sessions").select("*")
+    if date_from:
+        query = query.gte("created_at", date_from)
+    if date_to:
+        # Inclusive of the whole "to" day, same reasoning as list_customers.
+        query = query.lte("created_at", f"{date_to}T23:59:59")
+    if status:
+        query = query.eq("status", status)
+    if issue:
+        query = query.ilike("case_summary", f"%{issue}%")
+    if follow_up_required:
+        query = query.eq("follow_up_required", follow_up_required.lower() == "true")
+    rows = query.order("created_at", desc=True).execute().data or []
+
+    profile_ids = list({r["profile_id"] for r in rows if r.get("profile_id")})
+    pet_ids = list({r["pet_id"] for r in rows if r.get("pet_id")})
+    doctor_phones = list(
+        {r["doctor_phone"] for r in rows if r.get("doctor_phone") and r["doctor_phone"] != "pending_doctor_choice"}
+    )
+
+    profiles_by_id: dict[str, dict[str, Any]] = {}
+    if profile_ids:
+        for p in client.table("profiles").select("*").in_("id", profile_ids).execute().data or []:
+            profiles_by_id[p["id"]] = p
+
+    pets_by_id: dict[str, dict[str, Any]] = {}
+    if pet_ids:
+        for p in client.table("pets").select("*").in_("id", pet_ids).execute().data or []:
+            pets_by_id[p["id"]] = p
+
+    doctors_by_phone: dict[str, dict[str, Any]] = {}
+    if doctor_phones:
+        for d in client.table("profiles").select("*").in_("phone_number", doctor_phones).eq("role", "vet").execute().data or []:
+            doctors_by_phone[d["phone_number"]] = d
+
+    appointments = []
+    for row in rows:
+        customer = profiles_by_id.get(row.get("profile_id"))
+        pet = pets_by_id.get(row.get("pet_id"))
+        doctor_profile = doctors_by_phone.get(row.get("doctor_phone"))
+        appointments.append(
+            {
+                "session_id": row["id"],
+                "customer_id": row.get("profile_id"),
+                "customer_name": customer.get("full_name") if customer else None,
+                "city": customer.get("city") if customer else None,
+                "pet_name": pet.get("name") if pet else None,
+                "breed": pet.get("breed") if pet else None,
+                "age": pet.get("age") if pet else None,
+                "age_group": _age_group(pet.get("age") if pet else None),
+                "doctor_name": doctor_profile.get("full_name") if doctor_profile else None,
+                "booked_at": row.get("created_at"),
+                "completed_at": row.get("completed_at"),
+                "status": row.get("status"),
+                "case_summary": row.get("case_summary"),
+                "prescription_status": _prescription_status(row),
+                "follow_up_required": bool(row.get("follow_up_required")),
+                "follow_up_date": row.get("follow_up_date"),
+            }
+        )
+
+    if breed:
+        needle = breed.lower()
+        appointments = [a for a in appointments if needle in (a.get("breed") or "").lower()]
+    if age_group:
+        appointments = [a for a in appointments if a["age_group"].lower() == age_group.lower()]
+    if city:
+        needle = city.lower()
+        appointments = [a for a in appointments if needle in (a.get("city") or "").lower()]
+    if doctor:
+        needle = doctor.lower()
+        appointments = [a for a in appointments if needle in (a.get("doctor_name") or "").lower()]
+
+    total_count = len(appointments)
+    appointments = appointments[offset:offset + limit] if offset else appointments[:limit]
+
+    return {"appointments": appointments, "count": total_count}
+
+
+# ---------------------------------------------------------------------------
 # Analytics
 # ---------------------------------------------------------------------------
 
@@ -499,50 +639,91 @@ def _month_start_iso() -> str:
     return datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
+def _resolve_range(date_from: str, date_to: str) -> tuple[str, str]:
+    """Both analytics endpoints share the same "default to the current
+    calendar month, else use whatever explicit range was given" rule, so a
+    bare page load still shows something meaningful before a user ever
+    touches the date filter."""
+    start = date_from or _month_start_iso()[:10]
+    end = date_to or date.today().isoformat()
+    return start, end
+
+
 @router.get("/analytics/overview")
-async def analytics_overview(request: Request) -> dict[str, Any]:
+async def analytics_overview(request: Request, date_from: str = "", date_to: str = "") -> dict[str, Any]:
     ctx = _ctx(request)
     client = ctx.supabase
-    month_start = _month_start_iso()
+    range_start, range_end = _resolve_range(date_from, date_to)
+    range_end_ts = f"{range_end}T23:59:59"
 
     total_customers = len(client.table("profiles").select("id").eq("role", "customer").execute().data or [])
     active_subs = client.table("subscriptions").select("amount").eq("status", "active").execute().data or []
     founding_count = len(client.table("profiles").select("id").eq("is_founding_member", True).execute().data or [])
 
     new_signups = len(
-        client.table("profiles").select("id").eq("role", "customer").gte("created_at", month_start).execute().data or []
+        client.table("profiles").select("id").eq("role", "customer")
+        .gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
     )
-    consults_this_month = len(
-        client.table("doctor_sessions").select("id").eq("status", "accepted").gte("created_at", month_start).execute().data or []
+    # "Completed" here means status=='completed' -- consults_this_month used
+    # to count status=='accepted' (upcoming/confirmed, not actually done),
+    # which under-reported nothing but mislabeled what it was counting.
+    sessions_in_range = (
+        client.table("doctor_sessions").select("id, status")
+        .gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
     )
-    symptom_checks_this_month = len(
-        client.table("health_logs").select("id").gte("created_at", month_start).execute().data or []
+    completed_consultations = sum(1 for s in sessions_in_range if s.get("status") == "completed")
+    pending_consultations = sum(1 for s in sessions_in_range if s.get("status") in ("pending", "negotiating", "accepted"))
+    cancelled_consultations = sum(1 for s in sessions_in_range if s.get("status") in ("declined", "cancelled"))
+    symptom_checks = len(
+        client.table("health_logs").select("id").gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
     )
-    documents_this_month = len(
-        client.table("documents").select("id").gte("uploaded_at", month_start).execute().data or []
+    documents_uploaded = len(
+        client.table("documents").select("id").gte("uploaded_at", range_start).lte("uploaded_at", range_end_ts).execute().data or []
     )
 
     return {
+        "date_from": range_start,
+        "date_to": range_end,
         "total_customers": total_customers,
         "active_subscribers": len(active_subs),
         "founding_members": founding_count,
         "standard_subscribers": len(active_subs) - founding_count,
         "estimated_mrr": sum(s.get("amount") or 0 for s in active_subs),
-        "new_signups_this_month": new_signups,
-        "consults_this_month": consults_this_month,
-        "symptom_checks_this_month": symptom_checks_this_month,
-        "documents_this_month": documents_this_month,
+        "new_signups": new_signups,
+        "completed_consultations": completed_consultations,
+        "pending_consultations": pending_consultations,
+        "cancelled_consultations": cancelled_consultations,
+        "symptom_checks": symptom_checks,
+        "documents_uploaded": documents_uploaded,
     }
 
 
 @router.get("/analytics/timeseries")
-async def analytics_timeseries(request: Request, days: int = 30) -> dict[str, Any]:
+async def analytics_timeseries(request: Request, date_from: str = "", date_to: str = "", days: int = 30) -> dict[str, Any]:
     ctx = _ctx(request)
     client = ctx.supabase
-    since = (date.today() - timedelta(days=days)).isoformat()
+    if date_from or date_to:
+        since, until = _resolve_range(date_from, date_to)
+    else:
+        since = (date.today() - timedelta(days=days)).isoformat()
+        until = date.today().isoformat()
+    until_ts = f"{until}T23:59:59"
 
-    signups = client.table("profiles").select("created_at").eq("role", "customer").gte("created_at", since).execute().data or []
-    subscriptions = client.table("subscriptions").select("created_at, amount").gte("created_at", since).execute().data or []
+    signups = (
+        client.table("profiles").select("created_at").eq("role", "customer")
+        .gte("created_at", since).lte("created_at", until_ts).execute().data or []
+    )
+    subscriptions = (
+        client.table("subscriptions").select("created_at, amount")
+        .gte("created_at", since).lte("created_at", until_ts).execute().data or []
+    )
+    # Grouped by created_at (booked date), not completed_at -- completed_at
+    # only exists for sessions completed after that column was added, so
+    # grouping by it would show nothing for older data.
+    completed_sessions = (
+        client.table("doctor_sessions").select("created_at, status")
+        .eq("status", "completed").gte("created_at", since).lte("created_at", until_ts).execute().data or []
+    )
 
     signups_by_day: dict[str, int] = {}
     for row in signups:
@@ -554,7 +735,13 @@ async def analytics_timeseries(request: Request, days: int = 30) -> dict[str, An
         day = (row.get("created_at") or "")[:10]
         revenue_by_day[day] = revenue_by_day.get(day, 0) + (row.get("amount") or 0)
 
+    consultations_by_day: dict[str, int] = {}
+    for row in completed_sessions:
+        day = (row.get("created_at") or "")[:10]
+        consultations_by_day[day] = consultations_by_day.get(day, 0) + 1
+
     return {
         "signups": [{"date": d, "count": c} for d, c in sorted(signups_by_day.items())],
         "revenue": [{"date": d, "amount": a} for d, a in sorted(revenue_by_day.items())],
+        "consultations": [{"date": d, "count": c} for d, c in sorted(consultations_by_day.items())],
     }

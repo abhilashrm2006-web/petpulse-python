@@ -1172,3 +1172,88 @@ async def test_deactivated_vets_are_never_offered_in_the_catalogue():
     sent_rows = ctx.whatsapp.send_interactive_list.call_args.kwargs["sections"][0]["rows"]
     doctor_names = {row["title"] for row in sent_rows if "cancel_booking" not in row["id"]}
     assert doctor_names == {"Dr. Active"}
+
+
+@pytest.mark.asyncio
+async def test_mark_session_done_sets_completed_at():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "accepted"}
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await mark_session_done(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is True
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_file_prescription_stores_follow_up_when_required():
+    supabase = _prescription_test_session()
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await file_prescription(
+        ctx,
+        agent_ctx,
+        session_id="session-a",
+        medications="Amoxicillin 250mg twice daily",
+        treatment_plan="Rest for 5 days",
+        follow_up_required=True,
+        follow_up_date="2026-08-10",
+    )
+
+    assert result["success"] is True
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["follow_up_required"] is True
+    assert session["follow_up_date"] == "2026-08-10"
+
+
+@pytest.mark.asyncio
+async def test_file_prescription_defaults_follow_up_to_not_required():
+    supabase = _prescription_test_session()
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await file_prescription(
+        ctx, agent_ctx, session_id="session-a", medications="Amoxicillin 250mg twice daily"
+    )
+
+    assert result["success"] is True
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["follow_up_required"] is False
+    assert session["follow_up_date"] is None
+
+
+@pytest.mark.asyncio
+async def test_file_prescription_ignores_follow_up_date_when_not_required():
+    """A stray follow_up_date the LLM passes despite follow_up_required=False
+    (e.g. leftover from earlier context) must never be stored as a real
+    follow-up date -- follow_up_required is the source of truth."""
+    supabase = _prescription_test_session()
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await file_prescription(
+        ctx,
+        agent_ctx,
+        session_id="session-a",
+        medications="Amoxicillin 250mg twice daily",
+        follow_up_required=False,
+        follow_up_date="2026-08-10",
+    )
+
+    assert result["success"] is True
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["follow_up_date"] is None
