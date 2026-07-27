@@ -135,6 +135,47 @@ async def test_list_customers_filters_by_tier():
 
 
 @pytest.mark.asyncio
+async def test_list_customers_filters_by_breed():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "HasLab", "phone_number": "919000000001", "created_at": "2026-01-01"},
+                {"id": "c2", "role": "customer", "full_name": "HasPersian", "phone_number": "919000000002", "created_at": "2026-01-02"},
+            ],
+            "pets": [
+                {"id": "p1", "profile_id": "c1", "name": "Rex", "breed": "Labrador", "created_at": "2026-01-01"},
+                {"id": "p2", "profile_id": "c2", "name": "Milo", "breed": "Persian", "created_at": "2026-01-02"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request, breed="labrador")
+
+    assert result["count"] == 1
+    assert result["customers"][0]["full_name"] == "HasLab"
+
+
+@pytest.mark.asyncio
+async def test_list_customer_breeds_returns_distinct_sorted_breeds():
+    supabase = FakeSupabaseClient(
+        initial={
+            "pets": [
+                {"id": "p1", "breed": "Labrador"},
+                {"id": "p2", "breed": "Persian"},
+                {"id": "p3", "breed": "Labrador"},
+                {"id": "p4", "breed": None},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customer_breeds(request)
+
+    assert result["breeds"] == ["Labrador", "Persian"]
+
+
+@pytest.mark.asyncio
 async def test_activate_customer_flips_is_active_true():
     supabase = FakeSupabaseClient(initial={"profiles": [{"id": "c1", "role": "customer", "is_active": False}]})
     request = _fake_request(_make_ctx(supabase))

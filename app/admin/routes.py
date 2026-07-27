@@ -98,6 +98,7 @@ async def list_customers(
     date_from: str = "",
     date_to: str = "",
     tier: str = "",
+    breed: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -132,9 +133,8 @@ async def list_customers(
     if tier:
         rows = [r for r in rows if r["subscription_category"].lower() == tier.lower()]
 
-    total_count = len(rows)
-    rows = rows[offset:offset + limit] if offset else rows[:limit]
-
+    # Pets are fetched before the breed filter/pagination split -- "has a pet of
+    # this breed" is a property of the full result set, not just the current page.
     profile_ids = [r["id"] for r in rows]
     pets_by_profile: dict[str, list[dict[str, Any]]] = {}
     if profile_ids:
@@ -144,7 +144,25 @@ async def list_customers(
     for row in rows:
         row["pets"] = pets_by_profile.get(row["id"], [])
 
+    if breed:
+        needle = breed.lower()
+        rows = [r for r in rows if any(needle in (p.get("breed") or "").lower() for p in r["pets"])]
+
+    total_count = len(rows)
+    rows = rows[offset:offset + limit] if offset else rows[:limit]
+
     return {"customers": rows, "count": total_count}
+
+
+@router.get("/customers/breeds")
+async def list_customer_breeds(request: Request) -> dict[str, Any]:
+    """Distinct pet breeds on file, for the breed filter dropdown -- a plain
+    text filter would work too, but a dropdown avoids typos/mismatches
+    against what's actually in the data."""
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("pets").select("breed").execute().data or []
+    breeds = sorted({r["breed"] for r in rows if r.get("breed")})
+    return {"breeds": breeds}
 
 
 @router.get("/customers/{profile_id}")
