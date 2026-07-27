@@ -89,6 +89,52 @@ async def test_list_customers_filters_by_date_range():
 
 
 @pytest.mark.asyncio
+async def test_list_customers_categorizes_subscription_tier():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "FreeCust", "phone_number": "919000000001", "created_at": "2026-01-01", "is_founding_member": False},
+                {"id": "c2", "role": "customer", "full_name": "TrialCust", "phone_number": "919000000002", "created_at": "2026-01-02", "is_founding_member": False},
+                {"id": "c3", "role": "customer", "full_name": "SubCust", "phone_number": "919000000003", "created_at": "2026-01-03", "is_founding_member": False},
+                {"id": "c4", "role": "customer", "full_name": "FoundingCust", "phone_number": "919000000004", "created_at": "2026-01-04", "is_founding_member": True},
+            ],
+            "subscriptions": [
+                {"id": "s2", "profile_id": "c2", "status": "trial", "amount": 399, "created_at": "2026-01-02"},
+                {"id": "s3", "profile_id": "c3", "status": "active", "amount": 399, "created_at": "2026-01-03"},
+                {"id": "s4", "profile_id": "c4", "status": "active", "amount": 99, "created_at": "2026-01-04"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request)
+
+    categories = {c["full_name"]: c["subscription_category"] for c in result["customers"]}
+    assert categories == {"FreeCust": "Free", "TrialCust": "Trial", "SubCust": "Subscriber", "FoundingCust": "Founding"}
+
+
+@pytest.mark.asyncio
+async def test_list_customers_filters_by_tier():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "FreeCust", "phone_number": "919000000001", "created_at": "2026-01-01", "is_founding_member": False},
+                {"id": "c3", "role": "customer", "full_name": "SubCust", "phone_number": "919000000003", "created_at": "2026-01-03", "is_founding_member": False},
+            ],
+            "subscriptions": [
+                {"id": "s3", "profile_id": "c3", "status": "active", "amount": 399, "created_at": "2026-01-03"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request, tier="subscriber")
+
+    assert result["count"] == 1
+    assert result["customers"][0]["full_name"] == "SubCust"
+
+
+@pytest.mark.asyncio
 async def test_activate_customer_flips_is_active_true():
     supabase = FakeSupabaseClient(initial={"profiles": [{"id": "c1", "role": "customer", "is_active": False}]})
     request = _fake_request(_make_ctx(supabase))

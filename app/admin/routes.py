@@ -77,12 +77,27 @@ async def _cancel_active_subscription(ctx: AppContext, profile_id: str) -> bool:
 # Customers
 # ---------------------------------------------------------------------------
 
+def _subscription_category(profile: dict[str, Any], subscription: dict[str, Any] | None) -> str:
+    """Categorizes a customer for the admin list/filter -- mirrors the same
+    tiers the WhatsApp bot itself gates on (is_active_subscriber,
+    is_founding_member), so "Subscriber" here means the exact same thing
+    it means to the bot, not a separate admin-only notion of status."""
+    if not subscription:
+        return "Free"
+    if subscription.get("status") == "active":
+        return "Founding" if profile.get("is_founding_member") else "Subscriber"
+    if subscription.get("status") == "trial":
+        return "Trial"
+    return "Free"
+
+
 @router.get("/customers")
 async def list_customers(
     request: Request,
     search: str = "",
     date_from: str = "",
     date_to: str = "",
+    tier: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -97,8 +112,28 @@ async def list_customers(
         # Inclusive of the whole "to" day -- a bare date string sorts before
         # any timestamp on that same day, so a plain lte would exclude it.
         query = query.lte("created_at", f"{date_to}T23:59:59")
-    rows = query.order("created_at", desc=True).limit(limit).execute().data or []
-    rows = rows[offset:offset + limit] if offset else rows
+    rows = query.order("created_at", desc=True).execute().data or []
+
+    profile_ids = [r["id"] for r in rows]
+    subscriptions_by_profile: dict[str, dict[str, Any]] = {}
+    if profile_ids:
+        sub_rows = (
+            ctx.supabase.table("subscriptions").select("*").in_("profile_id", profile_ids)
+            .order("created_at", desc=True).execute().data or []
+        )
+        for sub in sub_rows:
+            # Most recent per profile only (sub_rows is already newest-first) --
+            # a customer's category reflects their current subscription, not history.
+            subscriptions_by_profile.setdefault(sub["profile_id"], sub)
+    for row in rows:
+        row["subscription"] = subscriptions_by_profile.get(row["id"])
+        row["subscription_category"] = _subscription_category(row, row["subscription"])
+
+    if tier:
+        rows = [r for r in rows if r["subscription_category"].lower() == tier.lower()]
+
+    total_count = len(rows)
+    rows = rows[offset:offset + limit] if offset else rows[:limit]
 
     profile_ids = [r["id"] for r in rows]
     pets_by_profile: dict[str, list[dict[str, Any]]] = {}
@@ -109,7 +144,7 @@ async def list_customers(
     for row in rows:
         row["pets"] = pets_by_profile.get(row["id"], [])
 
-    return {"customers": rows, "count": len(rows)}
+    return {"customers": rows, "count": total_count}
 
 
 @router.get("/customers/{profile_id}")
