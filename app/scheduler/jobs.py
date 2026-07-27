@@ -38,19 +38,24 @@ async def send_vaccination_reminders(ctx: AppContext) -> None:
         members = get_pet_member_contacts(client, vax["pet_id"])
         overdue = vax.get("next_due_date") and vax["next_due_date"] < today
         status_word = "overdue" if overdue else "due soon"
-        text = f"Reminder: {pet.get('name', 'Your pet')}'s {vax['vaccine_name']} vaccination is {status_word} ({vax.get('next_due_date')})."
+        pet_name = pet.get("name", "Your pet")
+        basic_text = f"Reminder: {pet_name}'s {vax['vaccine_name']} vaccination is {status_word} ({vax.get('next_due_date')})."
+        # Subscriber reminder carries the extra detail the full passport has
+        # (manufacturer/batch) when on file -- Free gets the basic due-date
+        # ping either way, this is a content upgrade, not a send gate.
+        detail_parts = [p for p in (vax.get("manufacturer"), f"Batch/Lot: {vax['batch_number']}" if vax.get("batch_number") else None) if p]
+        full_text = basic_text + (f" ({' | '.join(detail_parts)})" if detail_parts else "")
 
         for member in members:
             phone = member.get("phone_number")
             profile_id = member.get("profile_id")
-            # Pet Vaccination Tracker (the passport + these prorata reminders) is a
-            # Subscriber-only feature -- a Free member on file for this pet just
-            # doesn't get pinged, same as every other gated feature.
-            if phone and profile_id and is_active_subscriber(client, profile_id):
-                try:
-                    await ctx.whatsapp.send_text(phone, text)
-                except Exception:
-                    logger.exception("Failed to send vaccination reminder to %s", phone)
+            if not phone or not profile_id:
+                continue
+            text = full_text if is_active_subscriber(client, profile_id) else basic_text
+            try:
+                await ctx.whatsapp.send_text(phone, text)
+            except Exception:
+                logger.exception("Failed to send vaccination reminder to %s", phone)
 
         client.table("vaccinations").update(
             {"reminder_sent": True, "status": "overdue" if overdue else vax["status"]}

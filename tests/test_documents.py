@@ -90,6 +90,7 @@ async def test_file_document_files_to_the_exact_pet_id_once_disambiguated(monkey
             document_bytes=b"fake-bytes", document_mime_type="image/jpeg", document_classification=None, media_context="vaccination card",
         ),
         profile={"id": "vet-1"},
+        is_subscriber=True,
     )
     ctx = SimpleNamespace(supabase=supabase, whatsapp=None, settings=None, openai=AsyncMock())
 
@@ -114,3 +115,152 @@ async def test_send_pet_document_surfaces_owner_disambiguation_instead_of_guessi
     assert result["success"] is False
     assert result["error"] == "ambiguous_pet"
     assert {c["owner_name"] for c in result["candidates"]} == {"Abhilash", "Priya"}
+
+
+@pytest.mark.asyncio
+async def test_free_customer_blocked_at_5_document_cap(monkeypatch):
+    from tests.fake_supabase import FakeSupabaseClient
+    from app.agent.tools.documents import FREE_DOCUMENT_CAP
+
+    existing_docs = [{"id": f"doc-{i}", "pet_id": "pet-1"} for i in range(FREE_DOCUMENT_CAP)]
+    supabase = FakeSupabaseClient(initial={"documents": existing_docs})
+    agent_ctx = SimpleNamespace(
+        pets=[{"id": "pet-1", "name": "Rex"}],
+        pending_media=SimpleNamespace(document_bytes=b"fake-bytes", document_mime_type="image/jpeg", document_classification=None, media_context=""),
+        profile={"id": "profile-1"},
+        is_subscriber=False,
+    )
+    ctx = SimpleNamespace(supabase=supabase, whatsapp=None, settings=None, openai=AsyncMock())
+
+    result = await file_document(ctx, agent_ctx, pet_id="pet-1")
+
+    assert result["success"] is False
+    assert result["error"] == "subscriber_only_feature"
+    assert len(supabase.rows("documents")) == FREE_DOCUMENT_CAP
+
+
+@pytest.mark.asyncio
+async def test_subscriber_never_hits_the_document_cap(monkeypatch):
+    from tests.fake_supabase import FakeSupabaseClient
+    from app.agent.tools.documents import FREE_DOCUMENT_CAP
+
+    existing_docs = [{"id": f"doc-{i}", "pet_id": "pet-1"} for i in range(FREE_DOCUMENT_CAP + 3)]
+    supabase = FakeSupabaseClient(initial={"documents": existing_docs})
+    agent_ctx = SimpleNamespace(
+        pets=[{"id": "pet-1", "name": "Rex"}],
+        pending_media=SimpleNamespace(document_bytes=b"fake-bytes", document_mime_type="image/jpeg", document_classification=None, media_context="lab report"),
+        profile={"id": "profile-1"},
+        is_subscriber=True,
+    )
+    ctx = SimpleNamespace(supabase=supabase, whatsapp=None, settings=None, openai=AsyncMock())
+    monkeypatch.setattr("app.agent.tools.documents.upload_to_storage", lambda *a, **k: None)
+    monkeypatch.setattr("app.agent.tools.documents.json_completion", AsyncMock(return_value='{"record_kind": "none"}'))
+
+    result = await file_document(ctx, agent_ctx, pet_id="pet-1")
+
+    assert result["success"] is True
+    assert len(supabase.rows("documents")) == FREE_DOCUMENT_CAP + 4
+
+
+@pytest.mark.asyncio
+async def test_search_documents_finds_matches_across_ocr_text_and_summary():
+    from tests.fake_supabase import FakeSupabaseClient
+    from app.agent.tools.documents import search_documents
+
+    supabase = FakeSupabaseClient(
+        initial={
+            "documents": [
+                {"id": "doc-1", "pet_id": "pet-1", "document_name": "Lab Report", "document_type": "Lab Report", "uploaded_at": "2026-07-01", "ocr_text": "WBC count elevated", "ai_summary": ""},
+                {"id": "doc-2", "pet_id": "pet-1", "document_name": "Prescription", "document_type": "Prescription", "uploaded_at": "2026-07-02", "ocr_text": "", "ai_summary": "amoxicillin twice daily"},
+                {"id": "doc-3", "pet_id": "pet-1", "document_name": "Unrelated", "document_type": "Other", "uploaded_at": "2026-06-01", "ocr_text": "nothing relevant", "ai_summary": ""},
+            ]
+        }
+    )
+    agent_ctx = SimpleNamespace(pets=[{"id": "pet-1", "name": "Rex"}])
+    ctx = SimpleNamespace(supabase=supabase)
+
+    result = await search_documents(ctx, agent_ctx, query="amoxicillin")
+
+    assert result["success"] is True
+    assert result["count"] == 1
+    assert result["results"][0]["document_id"] == "doc-2"
+
+
+@pytest.mark.asyncio
+async def test_get_shareable_link_generates_and_persists_a_token():
+    from tests.fake_supabase import FakeSupabaseClient
+    from app.agent.tools.documents import get_shareable_link
+
+    supabase = FakeSupabaseClient(initial={"pets": [{"id": "pet-1", "name": "Rex", "passport_share_token": None}]})
+    agent_ctx = SimpleNamespace(pets=[{"id": "pet-1", "name": "Rex", "passport_share_token": None}])
+    ctx = SimpleNamespace(supabase=supabase, settings=SimpleNamespace(public_base_url="https://example.test"))
+
+    result = await get_shareable_link(ctx, agent_ctx, pet_id="pet-1")
+
+    assert result["success"] is True
+    assert result["url"].startswith("https://example.test/passport/")
+    stored_token = supabase.rows("pets")[0]["passport_share_token"]
+    assert stored_token and stored_token in result["url"]
+
+
+@pytest.mark.asyncio
+async def test_get_shareable_link_is_stable_across_calls():
+    from tests.fake_supabase import FakeSupabaseClient
+    from app.agent.tools.documents import get_shareable_link
+
+    supabase = FakeSupabaseClient(initial={"pets": [{"id": "pet-1", "name": "Rex", "passport_share_token": "already-set-token"}]})
+    agent_ctx = SimpleNamespace(pets=[{"id": "pet-1", "name": "Rex", "passport_share_token": "already-set-token"}])
+    ctx = SimpleNamespace(supabase=supabase, settings=SimpleNamespace(public_base_url="https://example.test"))
+
+    result = await get_shareable_link(ctx, agent_ctx, pet_id="pet-1")
+
+    assert result["url"] == "https://example.test/passport/already-set-token"
+
+
+@pytest.mark.asyncio
+async def test_free_customer_gets_basic_due_date_passport():
+    from tests.fake_supabase import FakeSupabaseClient
+    from app.agent.tools.documents import get_pet_passport
+
+    supabase = FakeSupabaseClient(
+        initial={
+            "vaccinations": [
+                {"id": "v1", "pet_id": "pet-1", "vaccine_name": "Rabies", "date_administered": "2025-07-01", "next_due_date": "2026-07-01", "manufacturer": "Zoetis", "batch_number": "LOT-1"},
+            ]
+        }
+    )
+    agent_ctx = SimpleNamespace(pets=[{"id": "pet-1", "name": "Rex", "species": "Dog"}], profile={"phone_number": "919876543210"}, is_subscriber=False)
+    ctx = SimpleNamespace(supabase=supabase, whatsapp=None)
+
+    result = await get_pet_passport(ctx, agent_ctx, pet_id="pet-1")
+
+    assert result["success"] is True
+    assert "Rabies" in result["passport_text"]
+    assert "due 2026-07-01" in result["passport_text"]
+    assert "Zoetis" not in result["passport_text"]
+    assert "Batch" not in result["passport_text"]
+    assert "overdue_vaccinations" not in result
+
+
+@pytest.mark.asyncio
+async def test_subscriber_gets_full_passport_with_batch_details(monkeypatch):
+    from tests.fake_supabase import FakeSupabaseClient
+    from app.agent.tools.documents import get_pet_passport
+
+    supabase = FakeSupabaseClient(
+        initial={
+            "vaccinations": [
+                {"id": "v1", "pet_id": "pet-1", "vaccine_name": "Rabies", "date_administered": "2025-07-01", "next_due_date": "2026-07-01", "manufacturer": "Zoetis", "batch_number": "LOT-1"},
+            ],
+            "medical_records": [],
+        }
+    )
+    agent_ctx = SimpleNamespace(pets=[{"id": "pet-1", "name": "Rex", "species": "Dog"}], profile={"phone_number": "919876543210"}, is_subscriber=True)
+    ctx = SimpleNamespace(supabase=supabase, whatsapp=SimpleNamespace(send_document=AsyncMock(), send_image=AsyncMock()))
+
+    result = await get_pet_passport(ctx, agent_ctx, pet_id="pet-1", send_certificates=False)
+
+    assert result["success"] is True
+    assert "Zoetis" in result["passport_text"]
+    assert "Batch/Lot: LOT-1" in result["passport_text"]
+    assert result["overdue_vaccinations"] == 1

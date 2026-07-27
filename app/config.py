@@ -44,6 +44,17 @@ class Settings(BaseSettings):
     # its id, not a per-customer value.
     razorpay_subscription_plan_id: str = "plan_TIFJusQ5szdoE2"
 
+    # Founding Member cohort (₹99/month, first FOUNDING_MEMBER_CAP sign-ups --
+    # see app/agent/tools/subscriptions.py). Placeholder until the plan is
+    # actually created via the API (blocked as of this writing by an expired
+    # Razorpay key -- see razorpay_key_id/secret) -- replace once real.
+    razorpay_founding_plan_id: str = "plan_FOUNDING_PLACEHOLDER"
+
+    # Public origin this service is reachable at -- used to build shareable
+    # links (e.g. GET /passport/{token}) that a vet/boarding facility can
+    # open without logging in.
+    public_base_url: str = "https://petpulse-python-production.up.railway.app"
+
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 

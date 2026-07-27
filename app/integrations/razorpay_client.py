@@ -49,19 +49,22 @@ async def create_subscription(
     customer_name: str,
     customer_phone: str,
     reference_id: str,
+    plan_id: str | None = None,
 ) -> dict[str, Any]:
-    """Creates a Razorpay Subscription against the pre-created monthly Plan
-    (Settings.razorpay_subscription_plan_id) -- a different API from
-    create_payment_link's one-off links, since this bills on a recurring
-    cadence. Razorpay has no "no end date" option; total_count=100 (~8
-    years of monthly billing) stands in for "until cancelled" -- the actual
-    end is whatever subscription.cancelled reports via the webhook, not
-    this count running out."""
+    """Creates a Razorpay Subscription against a pre-created monthly Plan --
+    a different API from create_payment_link's one-off links, since this
+    bills on a recurring cadence. Defaults to the standard ₹399
+    Settings.razorpay_subscription_plan_id; pass plan_id explicitly for a
+    different cohort (e.g. the ₹99 Founding Member plan). Razorpay has no
+    "no end date" option; total_count=100 (~8 years of monthly billing)
+    stands in for "until cancelled" -- the actual end is whatever
+    subscription.cancelled reports via the webhook, not this count running
+    out."""
     async with httpx.AsyncClient(timeout=30.0, auth=(settings.razorpay_key_id, settings.razorpay_key_secret)) as client:
         resp = await client.post(
             f"{RAZORPAY_API_BASE}/subscriptions",
             json={
-                "plan_id": settings.razorpay_subscription_plan_id,
+                "plan_id": plan_id or settings.razorpay_subscription_plan_id,
                 "customer_notify": 1,
                 "total_count": 100,
                 "notify_info": {"notify_phone": customer_phone},

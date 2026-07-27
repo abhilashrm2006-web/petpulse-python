@@ -17,7 +17,8 @@ from tests.fake_supabase import FakeSupabaseClient
 
 def _make_ctx(supabase=None, settings=None):
     whatsapp = SimpleNamespace(send_text=AsyncMock(), send_interactive_buttons=AsyncMock())
-    return SimpleNamespace(supabase=supabase or FakeSupabaseClient(), whatsapp=whatsapp, settings=settings or object())
+    default_settings = SimpleNamespace(razorpay_founding_plan_id="plan_FOUNDING_TEST", razorpay_subscription_plan_id="plan_STANDARD_TEST")
+    return SimpleNamespace(supabase=supabase or FakeSupabaseClient(), whatsapp=whatsapp, settings=settings or default_settings)
 
 
 def _msg(phone="919876543210", text="", button_reply_id=None, sender_name="Jane"):
@@ -277,8 +278,13 @@ async def test_city_step_saves_city_and_sends_tier_choice():
     assert handled is True
     assert supabase.rows("profiles")[0]["city"] == "Chennai"
     assert supabase.rows("profiles")[0]["registration_step"] == "awaiting_tier_choice"
-    assert ctx.whatsapp.send_text.await_count == 1
-    assert "Welcome to PetPulse AI World" in ctx.whatsapp.send_text.call_args.args[1]
+    assert ctx.whatsapp.send_text.await_count == 2
+    all_texts = " ".join(call.args[1] for call in ctx.whatsapp.send_text.await_args_list)
+    assert "Welcome to PetPulse AI World" in all_texts
+    # Feature pitch leads with the passport/vault/multi-pet anchors, not the AI chat/triage --
+    # matches the product's "between vet visits" positioning, not "AI vet in your pocket."
+    assert all_texts.index("vaccination passport") < all_texts.index("records vault") < all_texts.index("pets on one account")
+    assert all_texts.index("pets on one account") < all_texts.index("AI health chats") < all_texts.index("emergency triage")
     button_ids = {b["id"] for b in ctx.whatsapp.send_interactive_buttons.call_args.args[2]}
     assert button_ids == {"tier_choice|free", "tier_choice|subscriber"}
 

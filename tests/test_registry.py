@@ -26,7 +26,23 @@ def test_check_symptoms_is_open_to_free_and_subscriber_alike():
 
 
 def test_vet_is_never_restricted_by_tier_even_for_gated_tools():
-    assert is_tool_allowed_for_tier("file_document", "vet", is_subscriber=False) is True
+    assert is_tool_allowed_for_tier("search_documents", "vet", is_subscriber=False) is True
+
+
+def test_records_vault_tools_are_open_to_free_customers():
+    """send_pet_document/get_pet_passport/file_document work for Free too --
+    Free is capped (5 documents, basic passport), not locked out. Only
+    search/share are Subscriber-gated."""
+    for name in ("send_pet_document", "get_pet_passport", "file_document"):
+        assert is_tool_allowed_for_tier(name, "customer", is_subscriber=False) is True
+    assert is_tool_allowed_for_tier("search_documents", "customer", is_subscriber=False) is False
+    assert is_tool_allowed_for_tier("get_shareable_link", "customer", is_subscriber=False) is False
+
+
+def test_nearby_vet_finder_is_open_to_free_customers():
+    """Free gets the plain list; only the open_now/emergency_24h/category
+    filter params are Subscriber-only (enforced inside the tool, not here)."""
+    assert is_tool_allowed_for_tier("find_nearby_vets", "customer", is_subscriber=False) is True
 
 
 def test_start_subscription_is_never_tier_gated_itself():

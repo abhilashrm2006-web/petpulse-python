@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request, Response
 
 from app.agent.orchestrator import run_agent_turn
 from app.agent.tools.booking import handle_payment_webhook
+from app.agent.tools.documents import build_full_passport_text
 from app.config import get_settings
 from app.deps import AppContext
 from app.ingestion.context import build_context
@@ -55,6 +56,24 @@ app = FastAPI(title="PetPulse Core Engine", lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/passport/{token}")
+async def public_passport(token: str, request: Request) -> Response:
+    """Public, unauthenticated view of a pet's health passport -- generating
+    the token is a Subscriber-only action (documents.get_shareable_link),
+    but the link itself needs no login so a vet/boarding facility can open
+    it directly. Renders the same text build_full_passport_text produces
+    for the WhatsApp tool, so both surfaces stay in sync."""
+    ctx: AppContext = request.app.state.ctx
+    rows = ctx.supabase.table("pets").select("*").eq("passport_share_token", token).limit(1).execute().data
+    if not rows:
+        return Response(content="<h1>Link not found</h1>", media_type="text/html", status_code=404)
+    passport_text, _ = build_full_passport_text(ctx.supabase, rows[0])
+    html = "<html><body><pre style='font-family: sans-serif; white-space: pre-wrap;'>" + (
+        passport_text.replace("*", "").replace("<", "&lt;").replace(">", "&gt;")
+    ) + "</pre></body></html>"
+    return Response(content=html, media_type="text/html")
 
 
 @app.get("/webhook/petpulse-core")

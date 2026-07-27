@@ -5,8 +5,10 @@ where "the LLM decides" is intentionally bounded by a safety net."""
 
 import json
 import re
+from datetime import datetime
 from typing import Any
 
+from app.availability.slots import IST
 from app.deps import AppContext
 from app.ingestion.context import AgentContext
 from app.integrations.openai_client import json_completion
@@ -15,7 +17,19 @@ from app.utils.pet_resolution import resolve_pet
 TRIAGE_SYSTEM_PROMPT = """You are a veterinary triage assistant. Be conservative — round severity up when \
 uncertain. Never diagnose or prescribe. Respond with strict JSON:
 {"severity": 1-5, "severity_label": string, "requires_emergency_care": bool, "red_flags": [string], \
-"likely_categories": [string], "recommendation": string, "reasoning": string}"""
+"likely_categories": [string], "recommendation": string, "reasoning": string, \
+"first_aid_checklist": [string]}
+first_aid_checklist is a short ordered list of concrete first-aid/at-home steps appropriate right now \
+(e.g. "Keep them calm and limit movement", "Do not give any food or water"), not a repeat of the \
+recommendation sentence."""
+
+# Free tier gets a capped number of check_symptoms calls per calendar month
+# (account-wide, not per pet) -- Subscribers are unlimited. Counted against
+# health_logs, which already gets one row per successful assessment, same
+# pattern as the consult quota in booking.py.
+FREE_SYMPTOM_QUERY_LIMIT = 4
+
+SEVERITY_COLOR = {1: "Green", 2: "Green", 3: "Yellow", 4: "Red", 5: "Red"}
 
 RED_FLAG_KEYWORDS = [
     r"bloat", r"distend\w* abdomen", r"can'?t breathe", r"gasping", r"blue gums", r"pale gums",
@@ -40,6 +54,20 @@ def _severity_display(severity: int, severity_label: str) -> str:
     emoji = SEVERITY_EMOJI.get(severity, "🟡")
     label = severity_label or "Assessment"
     return f"{emoji} {label} ({severity}/5)"
+
+
+def _free_quota_used_up(client, profile_id: str) -> bool:
+    month_start = datetime.now(tz=IST).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    rows = (
+        client.table("health_logs")
+        .select("id")
+        .eq("profile_id", profile_id)
+        .gte("created_at", month_start)
+        .execute()
+        .data
+        or []
+    )
+    return len(rows) >= FREE_SYMPTOM_QUERY_LIMIT
 
 
 def _keyword_hit(patterns: list[str], text: str) -> list[str]:
@@ -86,6 +114,15 @@ async def check_symptoms(
     pet = resolution.pet or {}
     species = species or pet.get("species", "")
 
+    if not agent_ctx.is_subscriber and _free_quota_used_up(ctx.supabase, agent_ctx.profile["id"]):
+        return {
+            "success": False,
+            "error": "quota_exceeded",
+            "message": f"You've used your {FREE_SYMPTOM_QUERY_LIMIT} free symptom checks for this month — "
+            "subscribe for ₹399/month for unlimited checks, plus the full vaccination passport, records "
+            "vault, and multi-pet support.",
+        }
+
     user_prompt = f"Species: {species}\nPet: {pet_name or pet.get('name', 'unknown')}\nSymptoms: {symptoms}"
 
     assessment_failed = False
@@ -122,16 +159,37 @@ async def check_symptoms(
             }
         ).execute()
 
+    color = SEVERITY_COLOR.get(severity, "Yellow")
+
+    if not agent_ctx.is_subscriber:
+        # Free: one label + one sentence, no red_flags/categories/reasoning/checklist,
+        # and no consultation offer -- Red always says to seek emergency care right
+        # now regardless of tier, since that safety net never waits on a subscription.
+        one_liner = (
+            "This sounds like it could be a real emergency — please seek emergency vet care right now."
+            if color == "Red"
+            else verdict.get("recommendation", "")
+        )
+        return {
+            "success": True,
+            "severity_color": color,
+            "message": one_liner,
+            "assessment_failed": assessment_failed,
+            "action": "emergency" if color == "Red" else "advise",
+        }
+
     return {
         "success": True,
         "severity": severity,
         "severity_label": verdict.get("severity_label"),
         "severity_display": severity_display,
+        "severity_color": color,
         "requires_emergency_care": verdict.get("requires_emergency_care", False),
         "assessment_failed": assessment_failed,
         "red_flags": verdict.get("red_flags", []),
         "likely_categories": verdict.get("likely_categories", []),
         "recommendation": verdict.get("recommendation", ""),
+        "first_aid_checklist": verdict.get("first_aid_checklist", []),
         "message": verdict.get("recommendation", ""),
         "action": "emergency" if verdict.get("requires_emergency_care") else "advise",
     }

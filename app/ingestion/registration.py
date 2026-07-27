@@ -330,7 +330,21 @@ async def _handle_city(ctx: AppContext, profile: dict[str, Any], extracted: Extr
         return True
     ctx.supabase.table("profiles").update({"city": city, "registration_step": "awaiting_tier_choice"}).eq("id", profile["id"]).execute()
     await ctx.whatsapp.send_text(phone, "\U0001F389 Welcome to PetPulse AI World!")
-    await ctx.whatsapp.send_interactive_buttons(phone, "One more thing — which membership would you like?", TIER_BUTTONS)
+    # Feature order here matches the product's positioning: PetPulse is "the system that
+    # manages your pet's health between vet visits," not "AI vet in your pocket" -- so the
+    # passport/vault/multi-pet anchors lead, the flashier AI chat/triage features trail.
+    await ctx.whatsapp.send_text(
+        phone,
+        "As a Subscriber (₹399/month) you get:\n"
+        "🩺 Full vaccination passport — shareable with any vet or boarding facility\n"
+        "🗂️ Unlimited records vault — store, search, and share every document\n"
+        "🐾 Unlimited pets on one account\n"
+        "💬 Unlimited AI health chats, in English or Hindi\n"
+        "🚨 Full emergency triage with a first-aid checklist\n"
+        "📍 Nearby vet finder with open-now/emergency filters\n"
+        "...plus 1 free vet consultation every month.",
+    )
+    await ctx.whatsapp.send_interactive_buttons(phone, "Which membership would you like?", TIER_BUTTONS)
     return True
 
 

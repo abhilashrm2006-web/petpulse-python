@@ -6,6 +6,7 @@ agent-invoked action — the one deliberate behavior shift called out in the
 plan."""
 
 import json
+import secrets
 from datetime import date
 from typing import Any
 
@@ -15,6 +16,11 @@ from app.integrations.openai_client import json_completion
 from app.integrations.supabase_client import sign_storage_url, upload_to_storage
 from app.media_pipeline.classify import LABEL_TO_KEY, VALID_DOCUMENT_TYPES
 from app.utils.pet_resolution import resolve_pet
+
+# Free tier: manual document upload works, just capped -- Subscribers get
+# unlimited storage plus search and a shareable link (see search_documents /
+# get_shareable_link below).
+FREE_DOCUMENT_CAP = 5
 
 VACCINATION_ROUTE_MAP = {
     "subcutaneous": "Subcutaneous", "sc": "Subcutaneous", "sq": "Subcutaneous",
@@ -117,22 +123,17 @@ async def send_pet_document(
     }
 
 
-async def get_pet_passport(
-    ctx: AppContext, agent_ctx: AgentContext, pet_id: str = "", pet_name: str = "", send_certificates: bool = True
-) -> dict[str, Any]:
-    resolution = resolve_pet(agent_ctx.pets, pet_id=pet_id, pet_name=pet_name, auto_resolve_single=True)
-    if resolution.ambiguous:
-        return _ambiguous_pet_result(resolution, "Which pet's passport?")
-    pet = resolution.pet
-    if not pet:
-        return {"success": False, "error": "no_pet_on_file"}
-
+def build_full_passport_text(client, pet: dict[str, Any]) -> tuple[str, int]:
+    """The full Subscriber-grade passport: vaccinations (manufacturer/batch-lot/
+    next-due) plus recent medical records. Shared by get_pet_passport (WhatsApp)
+    and the public GET /passport/{token} route (app/main.py) so both surfaces
+    render identically from one source of truth."""
     vaccinations = (
-        ctx.supabase.table("vaccinations").select("*").eq("pet_id", pet["id"])
+        client.table("vaccinations").select("*").eq("pet_id", pet["id"])
         .order("date_administered", desc=True).execute().data or []
     )
     medical_records = (
-        ctx.supabase.table("medical_records").select("*").eq("pet_id", pet["id"])
+        client.table("medical_records").select("*").eq("pet_id", pet["id"])
         .order("visit_date", desc=True).limit(8).execute().data or []
     )
 
@@ -163,7 +164,51 @@ async def get_pet_passport(
     if older > 0:
         lines.append(f"...and {older} older")
 
-    passport_text = "\n".join(lines)
+    return "\n".join(lines), overdue_count
+
+
+def build_basic_due_date_list(client, pet: dict[str, Any]) -> str:
+    """Free tier: due dates only, no manufacturer/batch-lot detail, no
+    medical records, no shareable link -- just enough to know what's due."""
+    vaccinations = (
+        client.table("vaccinations").select("*").eq("pet_id", pet["id"])
+        .order("next_due_date", desc=False).execute().data or []
+    )
+    today = date.today().isoformat()
+    lines = [f"*{pet['name']}'s Vaccination Due Dates*"]
+    if not vaccinations:
+        lines.append("Nothing on file yet.")
+    for vax in vaccinations:
+        if not vax.get("next_due_date"):
+            continue
+        overdue = vax["next_due_date"] < today
+        flag = " (OVERDUE)" if overdue else ""
+        lines.append(f"- {vax['vaccine_name']}: due {vax['next_due_date']}{flag}")
+    return "\n".join(lines)
+
+
+async def get_pet_passport(
+    ctx: AppContext, agent_ctx: AgentContext, pet_id: str = "", pet_name: str = "", send_certificates: bool = True
+) -> dict[str, Any]:
+    resolution = resolve_pet(agent_ctx.pets, pet_id=pet_id, pet_name=pet_name, auto_resolve_single=True)
+    if resolution.ambiguous:
+        return _ambiguous_pet_result(resolution, "Which pet's passport?")
+    pet = resolution.pet
+    if not pet:
+        return {"success": False, "error": "no_pet_on_file"}
+
+    if not agent_ctx.is_subscriber:
+        passport_text = build_basic_due_date_list(ctx.supabase, pet)
+        return {
+            "success": True,
+            "mode": "passport",
+            "passport_text": passport_text,
+            "instruction_to_llm": "Relay passport_text verbatim. This is the Free-tier due-date list — if "
+            "the customer wants the full passport (manufacturer/batch details, records, a shareable link), "
+            "mention that's a Subscriber feature.",
+        }
+
+    passport_text, overdue_count = build_full_passport_text(ctx.supabase, pet)
 
     files_sent = 0
     if send_certificates:
@@ -217,6 +262,21 @@ async def file_document(
         target_pet = classification.target_pet
     if not target_pet:
         return {"success": False, "error": "ambiguous_pet", "message": "Which pet is this document for?"}
+
+    if not agent_ctx.is_subscriber:
+        pet_ids = [p["id"] for p in agent_ctx.pets if p.get("id")]
+        existing_count = (
+            len(ctx.supabase.table("documents").select("id").in_("pet_id", pet_ids).execute().data or [])
+            if pet_ids else 0
+        )
+        if existing_count >= FREE_DOCUMENT_CAP:
+            return {
+                "success": False,
+                "error": "subscriber_only_feature",
+                "message": f"You've reached the {FREE_DOCUMENT_CAP}-document limit on the Free plan — "
+                "subscribe for ₹399/month for unlimited storage, full-text search, and one-tap sharing with "
+                "your vet, so you always have your pet's complete health record in one place.",
+            }
 
     bucket = classification.bucket if classification else "medical-documents"
     ext = (media.document_mime_type or "").split("/")[-1] or "bin"
@@ -316,3 +376,80 @@ async def _extract_and_store_medical_record(
         return {"record_kind": "clinical"}
 
     return {"record_kind": "none"}
+
+
+async def search_documents(
+    ctx: AppContext, agent_ctx: AgentContext, query: str, pet_id: str = "", pet_name: str = ""
+) -> dict[str, Any]:
+    """Subscriber-only full-text search over filed documents -- reuses the
+    ocr_text/ai_summary every document already gets populated with at
+    filing time (see file_document/_extract_and_store_medical_record), no
+    separate OCR/indexing pipeline needed. Scoped to a specific pet if
+    given, otherwise every pet on the account."""
+    if pet_id or pet_name:
+        resolution = resolve_pet(agent_ctx.pets, pet_id=pet_id, pet_name=pet_name, auto_resolve_single=True)
+        if resolution.ambiguous:
+            return _ambiguous_pet_result(resolution, "Which pet's documents should I search?")
+        pet_ids = [resolution.pet["id"]] if resolution.pet else []
+    else:
+        pet_ids = [p["id"] for p in agent_ctx.pets if p.get("id")]
+
+    if not pet_ids:
+        return {"success": True, "count": 0, "results": [], "message": "No pets on file to search."}
+
+    pattern = f"%{query}%"
+    matches = {}
+    for column in ("ocr_text", "ai_summary", "document_name"):
+        rows = (
+            ctx.supabase.table("documents")
+            .select("id, document_name, document_type, uploaded_at, pet_id")
+            .in_("pet_id", pet_ids)
+            .ilike(column, pattern)
+            .execute()
+            .data
+            or []
+        )
+        for row in rows:
+            matches[row["id"]] = row
+
+    results = sorted(matches.values(), key=lambda r: r.get("uploaded_at") or "", reverse=True)[:10]
+    return {
+        "success": True,
+        "count": len(results),
+        "results": [
+            {"document_id": r["id"], "document_name": r["document_name"], "document_type": r["document_type"]}
+            for r in results
+        ],
+        "message": "Here's what I found." if results else f"No documents matching \"{query}\" on file.",
+    }
+
+
+async def get_shareable_link(ctx: AppContext, agent_ctx: AgentContext, pet_id: str = "", pet_name: str = "") -> dict[str, Any]:
+    """Subscriber-only: a stable, public, no-login link to a pet's health
+    summary (vaccination passport + recent records) -- satisfies both the
+    Vault's "share with vet" and the Vaccination Tracker's "shareable
+    passport" asks with one mechanism, since they'd render near-identical
+    read-only content anyway. The token itself never changes once
+    generated, so re-sharing later returns the same link."""
+    resolution = resolve_pet(agent_ctx.pets, pet_id=pet_id, pet_name=pet_name, auto_resolve_single=True)
+    if resolution.ambiguous:
+        return _ambiguous_pet_result(resolution, "Which pet's link do you want to share?")
+    pet = resolution.pet
+    if not pet:
+        return {"success": False, "error": "no_pet_on_file"}
+
+    token = pet.get("passport_share_token")
+    if not token:
+        token = secrets.token_urlsafe(24)
+        ctx.supabase.table("pets").update({"passport_share_token": token}).eq("id", pet["id"]).execute()
+        pet["passport_share_token"] = token
+
+    url = f"{ctx.settings.public_base_url}/passport/{token}"
+    return {
+        "success": True,
+        "mode": "share_link",
+        "url": url,
+        "instruction_to_llm": f"Share this link with the customer: {url} — anyone with it (a vet, boarding "
+        "facility, etc.) can view the summary without logging in. Don't restate the passport contents "
+        "yourself here, the link already carries them.",
+    }

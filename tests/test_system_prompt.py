@@ -7,7 +7,16 @@ had to silently cross-reference it against the pets list and didn't
 reliably do so. Fix: resolve the name explicitly and state in the prompt
 that the open session is scoped to that pet only."""
 
-from app.agent.system_prompt import CUSTOMER_RULES, GREETING_RULE, VET_RULES, _pet_name_for, build_system_prompt, build_turn_context
+from app.agent.system_prompt import (
+    CUSTOMER_RULES,
+    FREE_TIER_PERSONALIZATION_RULE,
+    GREETING_RULE,
+    SUBSCRIBER_PERSONALIZATION_RULE,
+    VET_RULES,
+    _pet_name_for,
+    build_system_prompt,
+    build_turn_context,
+)
 from app.ingestion.context import AgentContext
 from app.ingestion.webhook import ExtractedMessage
 
@@ -24,6 +33,24 @@ def test_greeting_rule_forbids_unprompted_symptom_recap():
 def test_greeting_rule_only_applies_to_customer_role():
     assert GREETING_RULE in build_system_prompt("customer")
     assert GREETING_RULE not in build_system_prompt("vet")
+
+
+def test_subscriber_gets_hindi_and_breed_aware_personalization_rule():
+    prompt = build_system_prompt("customer", is_subscriber=True)
+    assert SUBSCRIBER_PERSONALIZATION_RULE in prompt
+    assert FREE_TIER_PERSONALIZATION_RULE not in prompt
+
+
+def test_free_customer_gets_english_only_breed_generic_rule():
+    prompt = build_system_prompt("customer", is_subscriber=False)
+    assert FREE_TIER_PERSONALIZATION_RULE in prompt
+    assert SUBSCRIBER_PERSONALIZATION_RULE not in prompt
+
+
+def test_vet_gets_neither_personalization_rule():
+    prompt = build_system_prompt("vet", is_subscriber=False)
+    assert SUBSCRIBER_PERSONALIZATION_RULE not in prompt
+    assert FREE_TIER_PERSONALIZATION_RULE not in prompt
 
 
 def test_general_pet_qa_is_explicitly_in_scope_for_customers():

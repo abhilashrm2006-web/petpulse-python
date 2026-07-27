@@ -1,6 +1,11 @@
 """Ports `S50mzeVEaYXIbhk2` — Nearby Vet Finder / `find_nearby_vets` (spec
-§3.4). Live version uses Nominatim + Overpass (OSM), fixed 8km radius, no
-rating/open-now data."""
+§3.4). Live version uses Nominatim + Overpass (OSM), fixed 8km radius. Free
+customers get the plain list (name/address/distance); Subscribers can pass
+open_now/emergency_24h/category to filter it, computed from whatever OSM
+opening_hours/healthcare/name tags happen to be on file for that clinic --
+there is no ratings/reviews field in OSM data, so that specific filter from
+the product spec has no data source without adding a paid Google Places API
+dependency, and is deliberately not implemented here."""
 
 import math
 from typing import Any
@@ -34,12 +39,27 @@ async def _geocode(ctx: AppContext, query: str) -> tuple[float, float] | None:
     return float(results[0]["lat"]), float(results[0]["lon"])
 
 
+def _is_24h(opening_hours: str | None) -> bool:
+    return bool(opening_hours) and "24/7" in opening_hours
+
+
+def _matches_category(tags: dict[str, str], category: str) -> bool:
+    """OSM has no dedicated clinic/hospital/pharmacy split for amenity=veterinary --
+    best-effort keyword match against whatever tags/name are on file rather than a
+    hard data field. Known limitation, documented in the module docstring."""
+    haystack = " ".join(filter(None, [tags.get("healthcare"), tags.get("name", "")])).lower()
+    return category.lower() in haystack
+
+
 async def find_nearby_vets(
     ctx: AppContext,
     agent_ctx: AgentContext,
     location_text: str = "",
     latitude: float | None = None,
     longitude: float | None = None,
+    open_now: bool | None = None,
+    emergency_24h: bool | None = None,
+    category: str = "",
 ) -> dict[str, Any]:
     lat, lon = latitude, longitude
 
@@ -70,6 +90,10 @@ async def find_nearby_vets(
     resp.raise_for_status()
     elements = resp.json().get("elements", [])
 
+    # Subscriber-only filters -- silently no-op for a Free customer even if
+    # the LLM passed them, since find_nearby_vets itself isn't tool-gated.
+    apply_filters = getattr(agent_ctx, "is_subscriber", False)
+
     clinics = []
     for el in elements:
         tags = el.get("tags", {})
@@ -77,6 +101,14 @@ async def find_nearby_vets(
         el_lon = el.get("lon") or el.get("center", {}).get("lon")
         if el_lat is None or el_lon is None:
             continue
+        opening_hours = tags.get("opening_hours")
+        if apply_filters:
+            if open_now and not _is_24h(opening_hours):
+                continue  # can't reliably evaluate arbitrary opening_hours syntax against "right now" -- only 24/7 is a safe yes
+            if emergency_24h and not _is_24h(opening_hours):
+                continue
+            if category and not _matches_category(tags, category):
+                continue
         clinics.append(
             {
                 "name": tags.get("name", "Unnamed clinic"),
@@ -85,7 +117,7 @@ async def find_nearby_vets(
                 ),
                 "phone": tags.get("phone") or tags.get("contact:phone"),
                 "website": tags.get("website") or tags.get("contact:website"),
-                "opening_hours": tags.get("opening_hours"),
+                "opening_hours": opening_hours,
                 "maps_url": f"https://www.openstreetmap.org/?mlat={el_lat}&mlon={el_lon}",
                 "distance_km": round(_haversine_km(lat, lon, el_lat, el_lon), 2),
             }

@@ -88,12 +88,17 @@ TOOL_SPECS: list[ToolSpec] = [
     _spec(
         "find_nearby_vets",
         "Find nearby vet clinics. Use shared location-pin coordinates if available in context, else pass "
-        "location_text from what the customer said.",
-        {"location_text": _STR, "latitude": _NUM_OR_NULL, "longitude": _NUM_OR_NULL},
+        "location_text from what the customer said. Free customers get name/address/distance only; "
+        "Subscribers can additionally pass open_now/emergency_24h/category to filter results.",
+        {
+            "location_text": _STR, "latitude": _NUM_OR_NULL, "longitude": _NUM_OR_NULL,
+            "open_now": {"type": "boolean", "description": "Subscriber-only filter; ignored for Free customers."},
+            "emergency_24h": {"type": "boolean", "description": "Subscriber-only filter; ignored for Free customers."},
+            "category": {"type": "string", "description": "Subscriber-only filter: clinic|hospital|pharmacy. Ignored for Free customers."},
+        },
         [],
         vets.find_nearby_vets,
         CUSTOMER,
-        subscriber_only=True,
     ),
     _spec(
         "send_pet_document",
@@ -105,14 +110,14 @@ TOOL_SPECS: list[ToolSpec] = [
         [],
         documents.send_pet_document,
         CUSTOMER,
-        subscriber_only=True,
     ),
     _spec(
         "get_pet_passport",
-        "Build and return a full health-passport summary for a pet (vaccinations incl. manufacturer/batch-lot "
-        "number/next-due date, recent records). Also sends any vaccination certificate files on file as WhatsApp "
-        "attachments by default. On error=\"ambiguous_pet\" with `candidates`, disambiguate using each "
-        "candidate's owner_name/owner_phone and conversation context, then re-call with the exact pet_id.",
+        "Build and return a health-passport summary for a pet. Free customers get a trimmed due-date-only "
+        "list; Subscribers get the full passport (vaccinations incl. manufacturer/batch-lot number, recent "
+        "records) plus a shareable public link and certificate attachments. On error=\"ambiguous_pet\" with "
+        "`candidates`, disambiguate using each candidate's owner_name/owner_phone and conversation context, "
+        "then re-call with the exact pet_id.",
         {
             "pet_id": _STR, "pet_name": _STR,
             "send_certificates": {
@@ -123,7 +128,6 @@ TOOL_SPECS: list[ToolSpec] = [
         [],
         documents.get_pet_passport,
         CUSTOMER,
-        subscriber_only=True,
     ),
     _spec(
         "file_document",
@@ -131,7 +135,8 @@ TOOL_SPECS: list[ToolSpec] = [
         "prompt's document-filing rule applies to what was just uploaded. A vet's patients can span multiple "
         "unrelated owners — if the pet name given matches more than one (error=\"ambiguous_pet\" with "
         "`candidates`), use each candidate's owner_name/owner_phone plus who the message named to pick the "
-        "right one, then call again with its exact pet_id instead of pet_name. Never file to a guessed pet.",
+        "right one, then call again with its exact pet_id instead of pet_name. Never file to a guessed pet. "
+        "Free customers are capped at 5 documents total across all their pets.",
         {
             "pet_id": _STR,
             "pet_name": _STR,
@@ -140,8 +145,26 @@ TOOL_SPECS: list[ToolSpec] = [
         [],
         documents.file_document,
         BOTH,
-        # Only bites when role=customer (see is_tool_allowed_for_tier) -- a
-        # vet filing a document for a Free customer is never blocked.
+    ),
+    _spec(
+        "search_documents",
+        "Full-text search across a Subscriber's filed documents (prescriptions, X-rays, lab reports) by "
+        "keyword — searches document text/summary/type across all their pets unless a specific pet is given.",
+        {"query": _STR, "pet_id": _STR, "pet_name": _STR},
+        ["query"],
+        documents.search_documents,
+        CUSTOMER,
+        subscriber_only=True,
+    ),
+    _spec(
+        "get_shareable_link",
+        "Generate (or return the existing) public, no-login-required link to a pet's health summary — "
+        "vaccination passport plus recent records — that a vet or boarding facility can open directly. "
+        "Subscriber-only, one link per pet, stable across calls.",
+        {"pet_id": _STR, "pet_name": _STR},
+        [],
+        documents.get_shareable_link,
+        CUSTOMER,
         subscriber_only=True,
     ),
     _spec(

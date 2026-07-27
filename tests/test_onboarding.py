@@ -132,7 +132,7 @@ async def test_free_tier_customer_blocked_from_adding_a_second_pet():
 
     assert result["success"] is False
     assert result["error"] == "subscriber_only_feature"
-    assert "Subscriber" in result["message"]
+    assert "health timeline" in result["message"]
     assert ctx.supabase.rows("pets") == []
 
 

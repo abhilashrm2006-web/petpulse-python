@@ -23,24 +23,27 @@ confident value for: {"pet_name": string, "species": string, "breed": string, \
 respond with {}."""
 
 
-def _message_to_row(session_id: str, role: str, content: str) -> dict[str, Any]:
-    return {
+def _message_to_row(session_id: str, role: str, content: str, pet_id: str | None = None) -> dict[str, Any]:
+    row: dict[str, Any] = {
         "session_id": session_id,
         "message": {"type": role, "data": {"content": content, "additional_kwargs": {}, "type": role}},
     }
+    if pet_id:
+        row["pet_id"] = pet_id
+    return row
 
 
-def load_chat_history(client: Client, phone_number: str, window: int = CONTEXT_WINDOW_LENGTH) -> list[dict[str, str]]:
-    rows = (
-        client.table(CHAT_HISTORY_TABLE)
-        .select("*")
-        .eq("session_id", phone_number)
-        .order("id", desc=True)
-        .limit(window)
-        .execute()
-        .data
-        or []
-    )
+def load_chat_history(
+    client: Client, phone_number: str, pet_id: str | None = None, window: int = CONTEXT_WINDOW_LENGTH
+) -> list[dict[str, str]]:
+    """pet_id scopes the thread to one pet's own history (Subscriber
+    customers only -- see orchestrator.run_agent_turn) instead of one shared
+    account-wide stream, so each pet on a multi-pet Subscriber account
+    carries its own context rather than blending across pets."""
+    query = client.table(CHAT_HISTORY_TABLE).select("*").eq("session_id", phone_number)
+    if pet_id:
+        query = query.eq("pet_id", pet_id)
+    rows = query.order("id", desc=True).limit(window).execute().data or []
     rows.reverse()
     messages = []
     for row in rows:
@@ -52,12 +55,12 @@ def load_chat_history(client: Client, phone_number: str, window: int = CONTEXT_W
     return messages
 
 
-def append_turn(client: Client, phone_number: str, user_text: str, assistant_text: str) -> None:
+def append_turn(client: Client, phone_number: str, user_text: str, assistant_text: str, pet_id: str | None = None) -> None:
     rows = []
     if user_text:
-        rows.append(_message_to_row(phone_number, "human", user_text))
+        rows.append(_message_to_row(phone_number, "human", user_text, pet_id))
     if assistant_text:
-        rows.append(_message_to_row(phone_number, "ai", assistant_text))
+        rows.append(_message_to_row(phone_number, "ai", assistant_text, pet_id))
     if rows:
         client.table(CHAT_HISTORY_TABLE).insert(rows).execute()
 

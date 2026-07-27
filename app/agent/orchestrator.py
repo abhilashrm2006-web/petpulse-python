@@ -68,9 +68,15 @@ async def run_agent_turn(
     phone = agent_ctx.profile["phone_number"]
     role = agent_ctx.role
 
-    system_prompt = build_system_prompt(role)
+    system_prompt = build_system_prompt(role, is_subscriber=agent_ctx.is_subscriber)
     turn_context = build_turn_context(agent_ctx, extracted, media_context, document_filing_status)
-    history = memory.load_chat_history(client, phone)
+    # Persistent memory is a Subscriber perk for customers (vets always keep it --
+    # this isn't a customer tier feature for them). A Free customer's chat starts
+    # fresh every turn; a Subscriber's is scoped to the active pet so a multi-pet
+    # account doesn't blend context across pets.
+    memory_enabled = role == "vet" or agent_ctx.is_subscriber
+    memory_pet_id = agent_ctx.active_pet["id"] if (memory_enabled and role != "vet" and agent_ctx.active_pet) else None
+    history = memory.load_chat_history(client, phone, pet_id=memory_pet_id) if memory_enabled else []
     tools = get_tool_schemas(role)
 
     messages: list[dict[str, Any]] = (
@@ -129,15 +135,16 @@ async def run_agent_turn(
     # Each step is independently wrapped: a bug in one (e.g. the messages-insert
     # NOT-NULL violation found live in testing) must never silently prevent an
     # unrelated one (e.g. mark_onboarding_complete_if_needed) from running too.
-    try:
-        memory.append_turn(client, phone, extracted.text, final_text)
-    except Exception:
-        logger.exception("Failed to append chat history for phone=%s", phone)
+    if memory_enabled:
+        try:
+            memory.append_turn(client, phone, extracted.text, final_text, pet_id=memory_pet_id)
+        except Exception:
+            logger.exception("Failed to append chat history for phone=%s", phone)
 
-    try:
-        await memory.extract_and_update_memory(ctx.openai, ctx.settings, client, agent_ctx.profile["id"], extracted.text, final_text)
-    except Exception:
-        logger.exception("Failed to update long-term memory for profile=%s", agent_ctx.profile["id"])
+        try:
+            await memory.extract_and_update_memory(ctx.openai, ctx.settings, client, agent_ctx.profile["id"], extracted.text, final_text)
+        except Exception:
+            logger.exception("Failed to update long-term memory for profile=%s", agent_ctx.profile["id"])
 
     try:
         # A fresh `conversations` row per inbound message, matching n8n exactly (spec §2) —

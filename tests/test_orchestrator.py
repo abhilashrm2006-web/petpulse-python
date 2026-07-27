@@ -84,7 +84,7 @@ async def test_agent_calls_the_tool_the_model_picks_then_stops(monkeypatch):
         return responses.pop(0)
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
-    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone: [])
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
     monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
     monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
 
@@ -127,7 +127,7 @@ async def test_self_messaging_tool_suppresses_final_text(monkeypatch):
         return responses.pop(0)
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
-    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone: [])
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
     monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
     monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
 
@@ -178,7 +178,7 @@ async def test_booking_confirmation_suppresses_duplicate_agent_reply(monkeypatch
         return responses.pop(0)
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
-    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone: [])
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
     monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
     monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
 
@@ -227,7 +227,7 @@ async def test_free_customer_blocked_from_subscriber_only_tool_with_upsell(monke
         return responses.pop(0)
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
-    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone: [])
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
     monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
     monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
 
@@ -277,7 +277,7 @@ async def test_free_customer_can_still_reach_check_symptoms(monkeypatch):
         return responses.pop(0)
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
-    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone: [])
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
     monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
     monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
 
@@ -300,3 +300,87 @@ async def test_free_customer_can_still_reach_check_symptoms(monkeypatch):
     assert tool_calls_made == [{"symptoms": "vomiting"}]  # the real tool WAS called for a Free customer
     assert result == "🟠 Urgent (4/5) — would you like to book a vet consultation for this?"
     ctx.whatsapp.send_reply_and_chunk.assert_awaited_once_with("919876543210", result)
+
+
+@pytest.mark.asyncio
+async def test_free_customer_gets_no_persistent_memory(monkeypatch):
+    """Free customers start fresh every turn -- load_chat_history must not
+    even be called, and nothing gets appended/extracted afterward."""
+    load_calls = []
+    append_calls = []
+
+    async def fake_tool(ctx, agent_ctx, **kwargs):
+        return {"success": True}
+
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "get_tool_fn", lambda name: fake_tool)
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: load_calls.append(pet_id) or [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: append_calls.append(k))
+    extract_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", extract_mock)
+
+    responses = [_fake_response("Just a friendly reply.", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings, http=None, whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=False)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.6",
+        timestamp="1700000005", message_type="text", text="hi",
+    )
+
+    await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    assert load_calls == []
+    assert append_calls == []
+    extract_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_subscriber_gets_pet_scoped_memory(monkeypatch):
+    """Subscriber history is scoped to the active pet, not just the phone
+    number, so a multi-pet account doesn't blend context across pets."""
+    load_calls = []
+    append_calls = []
+
+    async def fake_tool(ctx, agent_ctx, **kwargs):
+        return {"success": True}
+
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "get_tool_fn", lambda name: fake_tool)
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: load_calls.append(pet_id) or [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: append_calls.append(k))
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    responses = [_fake_response("Sure, here's what I know about Rex.", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings, http=None, whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.7",
+        timestamp="1700000006", message_type="text", text="tell me about Rex",
+    )
+
+    await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    assert load_calls == ["pet-1"]
+    assert append_calls and append_calls[0].get("pet_id") == "pet-1"

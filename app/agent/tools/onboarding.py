@@ -102,8 +102,9 @@ async def save_onboarding_field(
             return {
                 "success": False,
                 "error": "subscriber_only_feature",
-                "message": "Adding more than one pet is a Subscriber feature — subscribe for just ₹399/month to "
-                "unlock it, including a free vet consult every month! Want me to send you the subscribe link?",
+                "message": "Track every pet's full health timeline in one place — subscribe for ₹399/month to "
+                "add unlimited pets, plus the full vaccination passport, records vault, and a free vet consult "
+                "every month. Want me to send you the subscribe link?",
             }
 
         created = (
