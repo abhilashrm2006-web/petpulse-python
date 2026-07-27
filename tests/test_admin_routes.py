@@ -157,6 +157,27 @@ async def test_list_customers_filters_by_breed():
 
 
 @pytest.mark.asyncio
+async def test_list_customers_filters_by_status():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "ActiveCust", "phone_number": "919000000001", "created_at": "2026-01-01", "is_active": True},
+                {"id": "c2", "role": "customer", "full_name": "InactiveCust", "phone_number": "919000000002", "created_at": "2026-01-02", "is_active": False},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    active_only = await admin_routes.list_customers(request, status="active")
+    assert active_only["count"] == 1
+    assert active_only["customers"][0]["full_name"] == "ActiveCust"
+
+    inactive_only = await admin_routes.list_customers(request, status="inactive")
+    assert inactive_only["count"] == 1
+    assert inactive_only["customers"][0]["full_name"] == "InactiveCust"
+
+
+@pytest.mark.asyncio
 async def test_list_customer_breeds_returns_distinct_sorted_breeds():
     supabase = FakeSupabaseClient(
         initial={

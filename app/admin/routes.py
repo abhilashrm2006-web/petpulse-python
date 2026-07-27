@@ -99,6 +99,7 @@ async def list_customers(
     date_to: str = "",
     tier: str = "",
     breed: str = "",
+    status: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -107,6 +108,8 @@ async def list_customers(
     if search:
         pattern = f"%{search}%"
         query = query.or_(f"full_name.ilike.{pattern},phone_number.ilike.{pattern},email.ilike.{pattern}")
+    if status:
+        query = query.eq("is_active", status.lower() == "active")
     if date_from:
         query = query.gte("created_at", date_from)
     if date_to:
