@@ -75,6 +75,20 @@ async def create_subscription(
         return resp.json()
 
 
+async def cancel_subscription(settings: Settings, provider_subscription_id: str) -> dict[str, Any]:
+    """Cancels immediately (cancel_at_cycle_end=0) -- used by the admin
+    dashboard's customer-deactivate action (app/admin/routes.py), where the
+    intent is "stop this account's access now," not "let them finish out
+    the billing cycle they already paid for.\""""
+    async with httpx.AsyncClient(timeout=30.0, auth=(settings.razorpay_key_id, settings.razorpay_key_secret)) as client:
+        resp = await client.post(
+            f"{RAZORPAY_API_BASE}/subscriptions/{provider_subscription_id}/cancel",
+            json={"cancel_at_cycle_end": 0},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 def extract_subscription_event(event_body: dict[str, Any]) -> tuple[str, str, str | None] | None:
     """Returns (event_type, subscription_id, reference_id) for any
     subscription.* webhook event (activated/charged/cancelled/etc.), or

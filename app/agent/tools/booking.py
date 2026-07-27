@@ -192,7 +192,10 @@ def _normalize_to_ist(time_str: str) -> str | None:
 
 async def _send_doctor_catalogue(ctx: AppContext, session_id: str, phone: str) -> bool:
     client = ctx.supabase
-    doctors = client.table("profiles").select("*").eq("role", "vet").limit(MAX_DOCTORS_LISTED).execute().data or []
+    doctors = (
+        client.table("profiles").select("*").eq("role", "vet").eq("is_active", True)
+        .limit(MAX_DOCTORS_LISTED).execute().data or []
+    )
     if not doctors:
         return False
 

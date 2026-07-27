@@ -70,6 +70,17 @@ class _FakeQuery:
         self._filters.append((col, "ilike", pattern))
         return self
 
+    def or_(self, expr):
+        # expr like "full_name.ilike.%x%,phone_number.ilike.%x%" -- real
+        # postgrest OR-filter syntax. Parsed into a list of (col, op, val)
+        # tuples matched with OR semantics (any one matching is enough).
+        conditions = []
+        for clause in expr.split(","):
+            col, op, val = clause.split(".", 2)
+            conditions.append((col, op, val))
+        self._filters.append((None, "or", conditions))
+        return self
+
     def order(self, *_args, **_kwargs):
         return self
 
@@ -94,7 +105,19 @@ class _FakeQuery:
                 needle = val.strip("%").lower()
                 if not row_val or needle not in str(row_val).lower():
                     return False
+            if op == "or":
+                if not any(self._matches_one(row, c, o, v) for c, o, v in val):
+                    return False
         return True
+
+    def _matches_one(self, row: dict[str, Any], col: str, op: str, val: str) -> bool:
+        row_val = row.get(col)
+        if op == "ilike":
+            needle = val.strip("%").lower()
+            return bool(row_val) and needle in str(row_val).lower()
+        if op == "eq":
+            return row_val == val
+        return False
 
     def execute(self):
         table = self._store.setdefault(self._table_name, [])

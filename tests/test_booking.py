@@ -53,7 +53,7 @@ async def test_pending_request_for_one_pet_does_not_block_a_different_pet():
                     "status": "pending",
                 }
             ],
-            "profiles": [{"id": "vet-1", "role": "vet", "phone_number": "919000000001", "full_name": "Dr. Rao"}],
+            "profiles": [{"id": "vet-1", "role": "vet", "phone_number": "919000000001", "full_name": "Dr. Rao", "is_active": True}],
         }
     )
     ctx = _make_ctx(supabase)
@@ -83,7 +83,7 @@ async def test_pending_request_for_the_same_pet_resends_the_list_with_session_id
                     "status": "pending",
                 }
             ],
-            "profiles": [{"id": "vet-1", "role": "vet", "phone_number": "919000000001", "full_name": "Dr. Rao"}],
+            "profiles": [{"id": "vet-1", "role": "vet", "phone_number": "919000000001", "full_name": "Dr. Rao", "is_active": True}],
         }
     )
     ctx = _make_ctx(supabase)
@@ -104,7 +104,7 @@ async def test_pending_request_for_the_same_pet_resends_the_list_with_session_id
 async def test_new_session_resolves_pet_id_instead_of_dropping_it():
     pet_a = {"id": "pet-a", "name": "Max"}
     supabase = FakeSupabaseClient(
-        initial={"profiles": [{"id": "vet-1", "role": "vet", "phone_number": "919000000001", "full_name": "Dr. Rao"}]}
+        initial={"profiles": [{"id": "vet-1", "role": "vet", "phone_number": "919000000001", "full_name": "Dr. Rao", "is_active": True}]}
     )
     ctx = _make_ctx(supabase)
     agent_ctx = _make_agent_ctx(pets=[pet_a])
@@ -1147,3 +1147,28 @@ async def test_cancel_session_sends_detailed_notice_to_doctor_when_customer_canc
     assert "Jane" in message and "919876543210" in message
     assert "Annual checkup" in message
     assert "Tue 28 Jul, 02:00 PM IST" in message
+
+
+@pytest.mark.asyncio
+async def test_deactivated_vets_are_never_offered_in_the_catalogue():
+    """Regression test for a real gap found while building the admin
+    dashboard: the vet catalogue query filtered role=vet but never
+    is_active, so deactivating a doctor (app/admin/routes.py) wouldn't
+    actually stop them being offered to customers."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "v1", "role": "vet", "phone_number": "919000000001", "full_name": "Dr. Active", "is_active": True},
+                {"id": "v2", "role": "vet", "phone_number": "919000000002", "full_name": "Dr. Deactivated", "is_active": False},
+            ],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await request_doctor_session(ctx, agent_ctx, case_summary="routine checkup")
+
+    assert result["success"] is True
+    sent_rows = ctx.whatsapp.send_interactive_list.call_args.kwargs["sections"][0]["rows"]
+    doctor_names = {row["title"] for row in sent_rows if "cancel_booking" not in row["id"]}
+    assert doctor_names == {"Dr. Active"}

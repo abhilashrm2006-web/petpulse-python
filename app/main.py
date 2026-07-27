@@ -9,8 +9,10 @@ import logging
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 
+from app.admin.auth import require_admin_token
+from app.admin.routes import router as admin_router
 from app.agent.orchestrator import run_agent_turn
 from app.agent.tools.booking import handle_payment_webhook
 from app.agent.tools.documents import build_full_passport_text
@@ -51,6 +53,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="PetPulse Core Engine", lifespan=lifespan)
+app.include_router(admin_router, prefix="/admin", dependencies=[Depends(require_admin_token)])
 
 
 @app.get("/health")

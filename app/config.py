@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # open without logging in.
     public_base_url: str = "https://petpulse-python-production.up.railway.app"
 
+    # Admin dashboard (app/admin/*) -- a single shared bearer token, checked by
+    # require_admin_token. Empty means the admin API fails closed (401 on
+    # everything, never silently open) until this is actually configured.
+    admin_api_token: str = ""
+
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 
