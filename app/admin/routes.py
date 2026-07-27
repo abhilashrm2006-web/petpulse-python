@@ -6,15 +6,19 @@ admin action leaves the exact same trail (cancelled calendar events,
 notified parties) a customer-initiated one would."""
 
 import logging
+import uuid
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from app.agent.tools.booking import cancel_session
 from app.deps import AppContext
 from app.integrations import razorpay_client
+from app.integrations.supabase_client import sign_storage_url, upload_to_storage
+
+DOCTOR_DOCUMENTS_BUCKET = "doctor-documents"
 
 logger = logging.getLogger(__name__)
 
@@ -245,15 +249,73 @@ async def delete_customer(profile_id: str, request: Request) -> dict[str, Any]:
 # Doctors
 # ---------------------------------------------------------------------------
 
+DOCTOR_EDITABLE_FIELDS = [
+    "full_name", "qualification", "registration_number", "specialization", "experience_years",
+    "consultation_fee", "area", "city", "hospital_name", "treatments", "opening_time", "closing_time",
+]
+
+
 @router.get("/doctors")
-async def list_doctors(request: Request, search: str = "") -> dict[str, Any]:
+async def list_doctors(
+    request: Request,
+    search: str = "",
+    area: str = "",
+    city: str = "",
+    hospital: str = "",
+    treatments: str = "",
+    status: str = "",
+) -> dict[str, Any]:
     ctx = _ctx(request)
     query = ctx.supabase.table("profiles").select("*").eq("role", "vet")
     if search:
         pattern = f"%{search}%"
         query = query.or_(f"full_name.ilike.{pattern},phone_number.ilike.{pattern},specialization.ilike.{pattern}")
+    if area:
+        query = query.ilike("area", f"%{area}%")
+    if city:
+        query = query.ilike("city", f"%{city}%")
+    if hospital:
+        query = query.ilike("hospital_name", f"%{hospital}%")
+    if treatments:
+        query = query.ilike("treatments", f"%{treatments}%")
+    if status:
+        query = query.eq("is_active", status.lower() == "active")
     rows = query.order("created_at", desc=True).execute().data or []
     return {"doctors": rows, "count": len(rows)}
+
+
+def _distinct_doctor_values(ctx: AppContext, column: str) -> list[str]:
+    rows = ctx.supabase.table("profiles").select(column).eq("role", "vet").execute().data or []
+    return sorted({r[column] for r in rows if r.get(column)})
+
+
+@router.get("/doctors/areas")
+async def list_doctor_areas(request: Request) -> dict[str, Any]:
+    return {"areas": _distinct_doctor_values(_ctx(request), "area")}
+
+
+@router.get("/doctors/cities")
+async def list_doctor_cities(request: Request) -> dict[str, Any]:
+    return {"cities": _distinct_doctor_values(_ctx(request), "city")}
+
+
+@router.get("/doctors/hospitals")
+async def list_doctor_hospitals(request: Request) -> dict[str, Any]:
+    return {"hospitals": _distinct_doctor_values(_ctx(request), "hospital_name")}
+
+
+@router.get("/doctors/treatments")
+async def list_doctor_treatments(request: Request) -> dict[str, Any]:
+    """Splits each doctor's comma-separated treatments field and dedupes --
+    treatments is free text (like specialization), not an enum, so the
+    filter dropdown reflects whatever's actually been typed in so far."""
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("profiles").select("treatments").eq("role", "vet").execute().data or []
+    treatments: set[str] = set()
+    for row in rows:
+        raw = row.get("treatments") or ""
+        treatments.update(t.strip() for t in raw.split(",") if t.strip())
+    return {"treatments": sorted(treatments)}
 
 
 @router.post("/doctors")
@@ -281,11 +343,36 @@ async def onboard_doctor(request: Request, payload: dict[str, Any]) -> dict[str,
                 "specialization": payload.get("specialization"),
                 "experience_years": payload.get("experience_years"),
                 "consultation_fee": payload.get("consultation_fee"),
+                "area": payload.get("area"),
+                "city": payload.get("city"),
+                "hospital_name": payload.get("hospital_name"),
+                "treatments": payload.get("treatments"),
+                "opening_time": payload.get("opening_time"),
+                "closing_time": payload.get("closing_time"),
             }
         )
         .execute()
         .data[0]
     )
+    return {"success": True, "doctor": row}
+
+
+@router.patch("/doctors/{profile_id}")
+async def update_doctor(profile_id: str, request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    """Partial update -- only DOCTOR_EDITABLE_FIELDS keys actually present in
+    the payload change. The first way to edit a doctor after onboarding at
+    all; without this, adding a filterable field (area/hospital/treatments/
+    hours) would be pointless for every doctor onboarded before it existed."""
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("profiles").select("id").eq("id", profile_id).eq("role", "vet").limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    updates = {k: v for k, v in payload.items() if k in DOCTOR_EDITABLE_FIELDS}
+    if not updates:
+        raise HTTPException(status_code=422, detail="No editable fields in payload")
+
+    row = ctx.supabase.table("profiles").update(updates).eq("id", profile_id).execute().data[0]
     return {"success": True, "doctor": row}
 
 
@@ -301,7 +388,80 @@ async def get_doctor(profile_id: str, request: Request) -> dict[str, Any]:
         ctx.supabase.table("doctor_sessions").select("id, status, preferred_time, profile_id")
         .eq("doctor_phone", profile["phone_number"]).order("created_at", desc=True).limit(20).execute().data or []
     )
-    return {"profile": profile, "recent_sessions": sessions}
+    documents = (
+        ctx.supabase.table("doctor_documents").select("*").eq("profile_id", profile_id)
+        .order("uploaded_at", desc=True).execute().data or []
+    )
+    return {"profile": profile, "recent_sessions": sessions, "documents": documents}
+
+
+@router.post("/doctors/{profile_id}/documents")
+async def upload_doctor_document(profile_id: str, request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
+    """Doctor-only attachments (licenses, degrees, etc.) -- a separate table/
+    bucket from the customer pet-record vault (documents.pet_id is NOT NULL
+    there, so a doctor attachment doesn't fit it)."""
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("profiles").select("id").eq("id", profile_id).eq("role", "vet").limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    data = await file.read()
+    ext = (file.filename or "").rsplit(".", 1)[-1] if "." in (file.filename or "") else "bin"
+    object_path = f"{profile_id}/{uuid.uuid4().hex}.{ext}"
+    upload_to_storage(ctx.supabase, DOCTOR_DOCUMENTS_BUCKET, object_path, data, file.content_type or "application/octet-stream")
+
+    row = (
+        ctx.supabase.table("doctor_documents")
+        .insert(
+            {
+                "profile_id": profile_id,
+                "document_name": file.filename or "document",
+                "storage_path": object_path,
+                "mime_type": file.content_type,
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    return {"success": True, "document": row}
+
+
+@router.get("/doctors/{profile_id}/documents")
+async def list_doctor_documents(profile_id: str, request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    rows = (
+        ctx.supabase.table("doctor_documents").select("*").eq("profile_id", profile_id)
+        .order("uploaded_at", desc=True).execute().data or []
+    )
+    for row in rows:
+        row["url"] = sign_storage_url(ctx.supabase, DOCTOR_DOCUMENTS_BUCKET, row["storage_path"])
+    return {"documents": rows}
+
+
+@router.delete("/doctors/{profile_id}/documents/{document_id}")
+async def delete_doctor_document(profile_id: str, document_id: str, request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("doctor_documents").select("*").eq("id", document_id).eq("profile_id", profile_id).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    try:
+        ctx.supabase.storage.from_(DOCTOR_DOCUMENTS_BUCKET).remove([rows[0]["storage_path"]])
+    except Exception:
+        logger.exception("Failed to remove storage object for doctor_document %s", document_id)
+    ctx.supabase.table("doctor_documents").delete().eq("id", document_id).execute()
+    return {"success": True}
+
+
+@router.post("/doctors/{profile_id}/activate")
+async def activate_doctor(profile_id: str, request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("profiles").select("id").eq("id", profile_id).eq("role", "vet").limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    ctx.supabase.table("profiles").update({"is_active": True}).eq("id", profile_id).execute()
+    return {"success": True}
 
 
 @router.post("/doctors/{profile_id}/deactivate")

@@ -305,7 +305,7 @@ async def select_doctor(ctx: AppContext, agent_ctx: AgentContext, session_id: st
         {"doctor_phone": doctor_phone, "awaiting_from": "customer_time_input"}
     ).eq("id", session_id).execute()
 
-    slots = await compute_doctor_slots(ctx.settings)
+    slots = await compute_doctor_slots(ctx.settings, client=client, doctor_phone=doctor_phone)
     if not slots:
         return {"success": True, "mode": "no_slots", "message": "That vet has no open slots in the next few days. Would you like to try another vet?"}
 
@@ -388,7 +388,7 @@ async def book_slot(ctx: AppContext, agent_ctx: AgentContext, session_id: str, s
         start = start.replace(tzinfo=IST)
     end = start + timedelta(minutes=SESSION_DURATION_MINUTES)
 
-    fresh_slots = await compute_doctor_slots(ctx.settings)
+    fresh_slots = await compute_doctor_slots(ctx.settings, client=client, doctor_phone=doctor_phone)
     if not any(s.start == start for s in fresh_slots):
         return await select_doctor(ctx, agent_ctx, session_id, doctor_phone)  # slot taken, resend fresh list
 

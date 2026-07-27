@@ -438,3 +438,180 @@ async def test_analytics_timeseries_groups_by_day():
     revenue = {row["date"]: row["amount"] for row in result["revenue"]}
     assert revenue["2026-07-01"] == 399
     assert revenue["2026-07-02"] == 99
+
+
+@pytest.mark.asyncio
+async def test_list_doctors_filters_by_area_city_hospital_treatments_status():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "v1", "role": "vet", "full_name": "Dr. Match", "phone_number": "919000000001", "created_at": "2026-01-01",
+                 "area": "Anna Nagar", "city": "Chennai", "hospital_name": "City Vet Hospital", "treatments": "Surgery, Dental", "is_active": True},
+                {"id": "v2", "role": "vet", "full_name": "Dr. NoMatch", "phone_number": "919000000002", "created_at": "2026-01-02",
+                 "area": "Velachery", "city": "Chennai", "hospital_name": "Other Clinic", "treatments": "Grooming", "is_active": False},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    assert (await admin_routes.list_doctors(request, area="anna"))["count"] == 1
+    assert (await admin_routes.list_doctors(request, city="chennai"))["count"] == 2
+    assert (await admin_routes.list_doctors(request, hospital="city vet"))["count"] == 1
+    assert (await admin_routes.list_doctors(request, treatments="dental"))["count"] == 1
+    assert (await admin_routes.list_doctors(request, status="active"))["count"] == 1
+    assert (await admin_routes.list_doctors(request, status="inactive"))["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_doctor_distinct_value_endpoints():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "v1", "role": "vet", "area": "Anna Nagar", "city": "Chennai", "hospital_name": "City Vet", "treatments": "Surgery, Dental"},
+                {"id": "v2", "role": "vet", "area": "Velachery", "city": "Chennai", "hospital_name": "Other Clinic", "treatments": "Dental, Grooming"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    assert (await admin_routes.list_doctor_areas(request))["areas"] == ["Anna Nagar", "Velachery"]
+    assert (await admin_routes.list_doctor_cities(request))["cities"] == ["Chennai"]
+    assert (await admin_routes.list_doctor_hospitals(request))["hospitals"] == ["City Vet", "Other Clinic"]
+    assert (await admin_routes.list_doctor_treatments(request))["treatments"] == ["Dental", "Grooming", "Surgery"]
+
+
+@pytest.mark.asyncio
+async def test_onboard_doctor_saves_new_fields():
+    supabase = FakeSupabaseClient()
+    request = _fake_request(_make_ctx(supabase))
+    payload = {
+        "full_name": "Dr. Rao", "phone_number": "919000000010", "area": "Anna Nagar", "city": "Chennai",
+        "hospital_name": "City Vet Hospital", "treatments": "Surgery, Dental",
+        "opening_time": "09:00", "closing_time": "18:00",
+    }
+
+    result = await admin_routes.onboard_doctor(request, payload)
+
+    doctor = result["doctor"]
+    assert doctor["area"] == "Anna Nagar"
+    assert doctor["hospital_name"] == "City Vet Hospital"
+    assert doctor["opening_time"] == "09:00"
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_partial_update():
+    supabase = FakeSupabaseClient(initial={"profiles": [{"id": "v1", "role": "vet", "full_name": "Dr. Rao", "area": None}]})
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.update_doctor("v1", request, {"area": "Anna Nagar", "not_a_real_field": "ignored"})
+
+    assert result["doctor"]["area"] == "Anna Nagar"
+    assert "not_a_real_field" not in result["doctor"]
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_404_when_missing():
+    supabase = FakeSupabaseClient()
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.update_doctor("nope", request, {"area": "X"})
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_422_when_no_editable_fields():
+    supabase = FakeSupabaseClient(initial={"profiles": [{"id": "v1", "role": "vet"}]})
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.update_doctor("v1", request, {"not_editable": "X"})
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_activate_doctor_flips_is_active_true():
+    supabase = FakeSupabaseClient(initial={"profiles": [{"id": "v1", "role": "vet", "is_active": False}]})
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.activate_doctor("v1", request)
+
+    assert result["success"] is True
+    assert supabase.rows("profiles")[0]["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_upload_doctor_document_stores_row_and_calls_storage(monkeypatch):
+    supabase = FakeSupabaseClient(initial={"profiles": [{"id": "v1", "role": "vet"}]})
+    request = _fake_request(_make_ctx(supabase))
+    upload_mock = AsyncMock() if False else None  # upload_to_storage is sync
+    monkeypatch.setattr("app.admin.routes.upload_to_storage", lambda *a, **k: None)
+
+    class FakeUploadFile:
+        filename = "license.pdf"
+        content_type = "application/pdf"
+
+        async def read(self):
+            return b"fake-bytes"
+
+    result = await admin_routes.upload_doctor_document("v1", request, file=FakeUploadFile())
+
+    assert result["success"] is True
+    doc = supabase.rows("doctor_documents")[0]
+    assert doc["profile_id"] == "v1"
+    assert doc["document_name"] == "license.pdf"
+
+
+@pytest.mark.asyncio
+async def test_upload_doctor_document_404_for_unknown_doctor():
+    supabase = FakeSupabaseClient()
+    request = _fake_request(_make_ctx(supabase))
+
+    class FakeUploadFile:
+        filename = "x.pdf"
+        content_type = "application/pdf"
+
+        async def read(self):
+            return b""
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.upload_doctor_document("nope", request, file=FakeUploadFile())
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_doctor_documents_includes_signed_url(monkeypatch):
+    supabase = FakeSupabaseClient(
+        initial={"doctor_documents": [{"id": "d1", "profile_id": "v1", "document_name": "license.pdf", "storage_path": "v1/abc.pdf", "uploaded_at": "2026-01-01"}]}
+    )
+    request = _fake_request(_make_ctx(supabase))
+    monkeypatch.setattr("app.admin.routes.sign_storage_url", lambda *a, **k: "https://signed.example/abc.pdf")
+
+    result = await admin_routes.list_doctor_documents("v1", request)
+
+    assert result["documents"][0]["url"] == "https://signed.example/abc.pdf"
+
+
+@pytest.mark.asyncio
+async def test_delete_doctor_document_removes_row():
+    supabase = FakeSupabaseClient(
+        initial={"doctor_documents": [{"id": "d1", "profile_id": "v1", "storage_path": "v1/abc.pdf"}]}
+    )
+    ctx = _make_ctx(supabase)
+    ctx.supabase.storage = SimpleNamespace(from_=lambda bucket: SimpleNamespace(remove=lambda paths: None))
+    request = _fake_request(ctx)
+
+    result = await admin_routes.delete_doctor_document("v1", "d1", request)
+
+    assert result["success"] is True
+    assert supabase.rows("doctor_documents") == []
+
+
+@pytest.mark.asyncio
+async def test_delete_doctor_document_404_when_missing():
+    supabase = FakeSupabaseClient()
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.delete_doctor_document("v1", "nope", request)
+    assert exc.value.status_code == 404

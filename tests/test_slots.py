@@ -97,3 +97,77 @@ async def test_compute_doctor_slots_blocks_the_whole_day_for_an_all_day_event(mo
     result = await compute_doctor_slots(settings=None, now=tuesday_9am)
 
     assert not any(s.start.date() == tuesday_9am.date() for s in result)
+
+
+def test_generate_slots_default_window_unchanged():
+    """Regression guard: no override still reproduces today's exact
+    10:00-17:30 window -- doctors without hours set must see zero
+    behavior change."""
+    default_slots = generate_slots(MONDAY_9AM, busy=[])
+    explicit_default_slots = generate_slots(MONDAY_9AM, busy=[], day_start_half_hour=20, day_end_half_hour=35)
+    assert [s.start for s in default_slots] == [s.start for s in explicit_default_slots]
+
+
+def test_generate_slots_respects_a_narrower_override():
+    slots = generate_slots(MONDAY_9AM, busy=[], day_start_half_hour=24, day_end_half_hour=28)  # 12:00-14:00
+    assert all(12 <= s.start.hour < 14 for s in slots)
+
+
+def test_time_to_half_hour_parses_hh_mm_ss():
+    from app.availability.slots import _time_to_half_hour
+
+    assert _time_to_half_hour("09:00:00") == 18
+    assert _time_to_half_hour("09:30:00") == 19
+    assert _time_to_half_hour("17:30:00") == 35
+
+
+def test_doctor_hours_returns_none_when_not_set():
+    from app.availability.slots import _doctor_hours
+    from tests.fake_supabase import FakeSupabaseClient
+
+    client = FakeSupabaseClient(initial={"profiles": [{"id": "v1", "role": "vet", "phone_number": "919000000001", "opening_time": None, "closing_time": None}]})
+    assert _doctor_hours(client, "919000000001") is None
+    assert _doctor_hours(None, "919000000001") is None
+    assert _doctor_hours(client, "") is None
+
+
+def test_doctor_hours_returns_half_hour_tuple_when_set():
+    from app.availability.slots import _doctor_hours
+    from tests.fake_supabase import FakeSupabaseClient
+
+    client = FakeSupabaseClient(
+        initial={"profiles": [{"id": "v1", "role": "vet", "phone_number": "919000000001", "opening_time": "12:00:00", "closing_time": "14:00:00"}]}
+    )
+    assert _doctor_hours(client, "919000000001") == (24, 28)
+
+
+@pytest.mark.asyncio
+async def test_compute_doctor_slots_uses_doctor_specific_hours(monkeypatch):
+    from app.availability import slots as slots_module
+    from tests.fake_supabase import FakeSupabaseClient
+
+    async def fake_list_busy_events(settings, time_min, time_max):
+        return []
+
+    monkeypatch.setattr(slots_module.google_calendar, "list_busy_events", fake_list_busy_events)
+    client = FakeSupabaseClient(
+        initial={"profiles": [{"id": "v1", "role": "vet", "phone_number": "919000000001", "opening_time": "12:00:00", "closing_time": "14:00:00"}]}
+    )
+
+    result = await compute_doctor_slots(settings=None, now=MONDAY_9AM, client=client, doctor_phone="919000000001")
+
+    assert all(12 <= s.start.hour < 14 for s in result)
+
+
+@pytest.mark.asyncio
+async def test_compute_doctor_slots_falls_back_to_default_when_no_doctor_phone(monkeypatch):
+    from app.availability import slots as slots_module
+
+    async def fake_list_busy_events(settings, time_min, time_max):
+        return []
+
+    monkeypatch.setattr(slots_module.google_calendar, "list_busy_events", fake_list_busy_events)
+
+    result = await compute_doctor_slots(settings=None, now=MONDAY_9AM)
+
+    assert all(s.start.hour >= 10 for s in result)

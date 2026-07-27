@@ -45,10 +45,18 @@ def _overlaps(slot_start: datetime, slot_end: datetime, busy_start: datetime, bu
     return slot_start < busy_end and slot_end > busy_start
 
 
-def generate_slots(now: datetime, busy: list[tuple[datetime, datetime]]) -> list[Slot]:
+def generate_slots(
+    now: datetime,
+    busy: list[tuple[datetime, datetime]],
+    day_start_half_hour: int = DAY_START_HALF_HOUR,
+    day_end_half_hour: int = DAY_END_HALF_HOUR,
+) -> list[Slot]:
     """Pure slot-generation algorithm, independent of the Google Calendar
     fetch — split out so it can be unit-tested without mocking network
-    calls."""
+    calls. day_start/end_half_hour default to the global window; pass a
+    doctor's own opening/closing hours (see compute_doctor_slots) to
+    override it per-doctor without changing behavior for anyone who hasn't
+    set hours."""
     now = now.astimezone(IST)
     buffer_start = now + timedelta(hours=BUFFER_HOURS)
 
@@ -59,7 +67,7 @@ def generate_slots(now: datetime, busy: list[tuple[datetime, datetime]]) -> list
             continue
 
         day_slots: list[Slot] = []
-        for half_hour in range(DAY_START_HALF_HOUR, DAY_END_HALF_HOUR):
+        for half_hour in range(day_start_half_hour, day_end_half_hour):
             if len(day_slots) >= MAX_PER_DAY:
                 break
             slot_start = _half_hour_to_time(day, half_hour)
@@ -90,7 +98,33 @@ def _parse_calendar_boundary(raw: str) -> datetime:
     return parsed.astimezone(IST)
 
 
-async def compute_doctor_slots(settings: Settings, now: datetime | None = None) -> list[Slot]:
+def _time_to_half_hour(raw: str) -> int:
+    """Postgres `time` columns come back from PostgREST as "HH:MM:SS" (or
+    occasionally "HH:MM"). Converts to the same half-hour-index unit
+    generate_slots already works in."""
+    parts = raw.split(":")
+    hour, minute = int(parts[0]), int(parts[1])
+    return hour * 2 + (1 if minute >= 30 else 0)
+
+
+def _doctor_hours(client, doctor_phone: str) -> tuple[int, int] | None:
+    """A doctor's own opening/closing time overrides the global default
+    window -- null on either field (the common case: no hours set yet)
+    means "use the existing default," not "closed all day.\""""
+    if client is None or not doctor_phone:
+        return None
+    rows = (
+        client.table("profiles").select("opening_time, closing_time").eq("phone_number", doctor_phone)
+        .eq("role", "vet").limit(1).execute().data
+    )
+    if not rows or not rows[0].get("opening_time") or not rows[0].get("closing_time"):
+        return None
+    return _time_to_half_hour(rows[0]["opening_time"]), _time_to_half_hour(rows[0]["closing_time"])
+
+
+async def compute_doctor_slots(
+    settings: Settings, now: datetime | None = None, client=None, doctor_phone: str | None = None
+) -> list[Slot]:
     now = (now or datetime.now(tz=timezone.utc)).astimezone(IST)
     window_end = now + timedelta(days=MAX_DAYS)
 
@@ -103,4 +137,7 @@ async def compute_doctor_slots(settings: Settings, now: datetime | None = None) 
             continue
         busy.append((_parse_calendar_boundary(start_raw), _parse_calendar_boundary(end_raw)))
 
+    hours = _doctor_hours(client, doctor_phone) if doctor_phone else None
+    if hours:
+        return generate_slots(now, busy, day_start_half_hour=hours[0], day_end_half_hour=hours[1])
     return generate_slots(now, busy)
