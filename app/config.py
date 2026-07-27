@@ -45,10 +45,9 @@ class Settings(BaseSettings):
     razorpay_subscription_plan_id: str = "plan_TIFJusQ5szdoE2"
 
     # Founding Member cohort (₹99/month, first FOUNDING_MEMBER_CAP sign-ups --
-    # see app/agent/tools/subscriptions.py). Placeholder until the plan is
-    # actually created via the API (blocked as of this writing by an expired
-    # Razorpay key -- see razorpay_key_id/secret) -- replace once real.
-    razorpay_founding_plan_id: str = "plan_FOUNDING_PLACEHOLDER"
+    # see app/agent/tools/subscriptions.py). Plan created once via the API,
+    # same as razorpay_subscription_plan_id above.
+    razorpay_founding_plan_id: str = "plan_TIObeBxQ0YnaEN"
 
     # Public origin this service is reachable at -- used to build shareable
     # links (e.g. GET /passport/{token}) that a vet/boarding facility can
