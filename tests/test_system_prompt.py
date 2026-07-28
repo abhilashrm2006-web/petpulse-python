@@ -10,8 +10,10 @@ that the open session is scoped to that pet only."""
 from app.agent.system_prompt import (
     CASUAL_TONE_RULE,
     CUSTOMER_RULES,
+    FORMATTING_RULES,
     FREE_TIER_PERSONALIZATION_RULE,
     GREETING_RULE,
+    SAFETY_RULES,
     SUBSCRIBER_PERSONALIZATION_RULE,
     VET_RULES,
     VOICE_REPLY_LANGUAGE_RULE_TEMPLATE,
@@ -74,6 +76,24 @@ def test_greeting_rule_acknowledges_the_already_sent_welcome_image():
     needs to know it's already been sent, not to send it itself."""
     assert "already been sent" in GREETING_RULE
     assert "Pulsy" in GREETING_RULE
+
+
+def test_safety_rules_forbid_a_severity_line_without_an_actual_tool_call():
+    """Found via a live model comparison during a response-quality audit: a
+    plain, vague check-in ("he seems tired today") got a hallucinated
+    "*Seriousness:* Moderate" line with no check_symptoms call behind it --
+    a real correctness/safety risk since severity_display is supposed to be
+    tool-grounded, never invented. This rule closes that loophole."""
+    assert "Seriousness" in SAFETY_RULES
+    assert "check_symptoms was actually called" in SAFETY_RULES
+
+
+def test_formatting_rules_calibrate_length_to_the_question():
+    """Found via the same audit: replies weren't calibrated to what was
+    actually asked -- a simple check-in got an over-elaborate structured
+    breakdown. FORMATTING_RULES now says explicitly to match length to the
+    question instead of just "be concise", which was too vague to act on."""
+    assert "match the reply's length" in FORMATTING_RULES
 
 
 def test_voice_reply_language_rule_asks_for_natural_spoken_style():
