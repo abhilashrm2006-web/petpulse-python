@@ -76,14 +76,14 @@ async def run_agent_turn(
 
     # Deterministic, not an LLM tool call -- a model tool-call-based version of this
     # didn't reliably fire turn to turn (confirmed live). Runs before the model ever
-    # sees the turn, so the mascot welcome clip always goes out for a real bare
+    # sees the turn, so the mascot welcome sticker always goes out for a real bare
     # greeting regardless of what the model does; it still writes its own warm text
     # separately (see GREETING_RULE), so this never duplicates that content.
     if role != "vet" and extracted.message_type == "text" and is_bare_greeting(extracted.text):
         try:
             await send_welcome_character(ctx, agent_ctx)
         except Exception:
-            logger.exception("Failed to send welcome character video for phone=%s", phone)
+            logger.exception("Failed to send welcome character sticker for phone=%s", phone)
 
     # A voice-note reply is only attempted for a Subscriber's own voice note, and
     # only while the feature is enabled (settings.voice_replies_enabled, an ops-level

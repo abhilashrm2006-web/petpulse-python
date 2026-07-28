@@ -117,3 +117,15 @@ async def test_send_video_posts_link_based_video_message():
     assert result["messages"][0]["id"] == "wamid.video1"
     assert fake.last_payload["type"] == "video"
     assert fake.last_payload["video"] == {"link": "https://example.com/pulsy-welcome.mp4", "caption": ""}
+
+
+@pytest.mark.asyncio
+async def test_send_sticker_posts_link_based_sticker_message():
+    fake = _FakeHttpClient([_ok_response({"messages": [{"id": "wamid.sticker1"}]})])
+    client = WhatsAppClient(Settings(), fake)
+
+    result = await client.send_sticker("919000000001", "https://example.com/pulsy-welcome.webp")
+
+    assert result["messages"][0]["id"] == "wamid.sticker1"
+    assert fake.last_payload["type"] == "sticker"
+    assert fake.last_payload["sticker"] == {"link": "https://example.com/pulsy-welcome.webp"}

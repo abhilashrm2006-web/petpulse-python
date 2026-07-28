@@ -30,15 +30,15 @@ def test_does_not_flag_non_bare_greetings(text):
 
 
 @pytest.mark.asyncio
-async def test_send_welcome_character_sends_the_mascot_video():
-    settings = Settings(pulsy_welcome_video_url="https://example.com/pulsy.mp4")
+async def test_send_welcome_character_sends_the_mascot_sticker():
+    settings = Settings(pulsy_welcome_sticker_url="https://example.com/pulsy.webp")
     ctx = AppContext(
         settings=settings, http=None,
-        whatsapp=SimpleNamespace(send_video=AsyncMock()),
+        whatsapp=SimpleNamespace(send_sticker=AsyncMock()),
         supabase=None, openai=None,
     )
     agent_ctx = SimpleNamespace(profile={"id": "profile-1", "phone_number": "919876543210"})
 
     await send_welcome_character(ctx, agent_ctx)
 
-    ctx.whatsapp.send_video.assert_awaited_once_with("919876543210", "https://example.com/pulsy.mp4")
+    ctx.whatsapp.send_sticker.assert_awaited_once_with("919876543210", "https://example.com/pulsy.webp")

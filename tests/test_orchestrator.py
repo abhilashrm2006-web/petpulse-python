@@ -330,7 +330,7 @@ async def test_free_customer_gets_no_persistent_memory(monkeypatch):
     settings = Settings(openai_agent_max_iterations=10)
     ctx = AppContext(
         settings=settings, http=None,
-        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_video=AsyncMock()),
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_sticker=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
     agent_ctx = _make_agent_ctx(is_subscriber=False)
@@ -344,7 +344,7 @@ async def test_free_customer_gets_no_persistent_memory(monkeypatch):
     assert load_calls == []
     assert append_calls == []
     extract_mock.assert_not_awaited()
-    ctx.whatsapp.send_video.assert_awaited_once_with("919876543210", settings.pulsy_welcome_video_url)
+    ctx.whatsapp.send_sticker.assert_awaited_once_with("919876543210", settings.pulsy_welcome_sticker_url)
 
 
 @pytest.mark.asyncio
@@ -633,7 +633,7 @@ async def test_welcome_image_not_sent_for_non_greeting_message(monkeypatch):
     settings = Settings(openai_agent_max_iterations=10)
     ctx = AppContext(
         settings=settings, http=None,
-        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_video=AsyncMock()),
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_sticker=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
     agent_ctx = _make_agent_ctx(is_subscriber=False)
@@ -644,7 +644,7 @@ async def test_welcome_image_not_sent_for_non_greeting_message(monkeypatch):
 
     await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
 
-    ctx.whatsapp.send_video.assert_not_awaited()
+    ctx.whatsapp.send_sticker.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -665,7 +665,7 @@ async def test_welcome_image_not_sent_for_vet_greeting(monkeypatch):
     settings = Settings(openai_agent_max_iterations=10)
     ctx = AppContext(
         settings=settings, http=None,
-        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_video=AsyncMock()),
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_sticker=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
     agent_ctx = _make_agent_ctx(role="vet")
@@ -676,7 +676,7 @@ async def test_welcome_image_not_sent_for_vet_greeting(monkeypatch):
 
     await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
 
-    ctx.whatsapp.send_video.assert_not_awaited()
+    ctx.whatsapp.send_sticker.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -699,7 +699,7 @@ async def test_welcome_image_send_failure_does_not_break_the_turn(monkeypatch):
     settings = Settings(openai_agent_max_iterations=10)
     ctx = AppContext(
         settings=settings, http=None,
-        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_video=AsyncMock(side_effect=RuntimeError("boom"))),
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_sticker=AsyncMock(side_effect=RuntimeError("boom"))),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
     agent_ctx = _make_agent_ctx(is_subscriber=False)

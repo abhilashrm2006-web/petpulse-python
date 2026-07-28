@@ -162,6 +162,10 @@ class WhatsAppClient:
             {"messaging_product": "whatsapp", "to": to, "type": "video", "video": {"link": link, "caption": caption}}
         )
 
+    async def send_sticker(self, to: str, link: str) -> dict:
+        # WhatsApp's sticker object has no caption field, like audio.
+        return await self._post({"messaging_product": "whatsapp", "to": to, "type": "sticker", "sticker": {"link": link}})
+
     async def send_document(self, to: str, link: str, filename: str, caption: str = "") -> dict:
         return await self._post(
             {

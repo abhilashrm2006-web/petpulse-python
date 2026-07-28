@@ -66,12 +66,14 @@ class Settings(BaseSettings):
     # everything, never silently open) until this is actually configured.
     admin_api_token: str = ""
 
-    # Pulsy mascot welcome clip, sent once per conversation on a bare greeting
-    # (see app/agent/tools/greeting.py, GREETING_RULE). A short looping zoom/pulse
-    # animation (ffmpeg zoompan over the static mascot art), sent as a WhatsApp
-    # video message since WhatsApp doesn't animate a plain image. Public Supabase
-    # Storage object -- no signed URL/expiry needed, it's a static brand asset.
-    pulsy_welcome_video_url: str = "https://ngxjkxqualvhkyyjckvs.supabase.co/storage/v1/object/public/brand-assets/pulsy-welcome.mp4"
+    # Pulsy mascot welcome sticker, sent once per conversation on a bare greeting
+    # (see app/agent/tools/greeting.py, GREETING_RULE). A real animated WhatsApp
+    # sticker (character waving/blinking/tail-wagging, generated via Sora on a
+    # flat chroma-key background then keyed to transparent webp) -- sent as a
+    # `sticker` message so it loops inline in the chat like a native WhatsApp
+    # sticker, not a video that opens in a player. Public Supabase Storage
+    # object -- no signed URL/expiry needed, it's a static brand asset.
+    pulsy_welcome_sticker_url: str = "https://ngxjkxqualvhkyyjckvs.supabase.co/storage/v1/object/public/brand-assets/pulsy-welcome.webp"
 
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
