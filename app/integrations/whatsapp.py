@@ -153,6 +153,10 @@ class WhatsAppClient:
             {"messaging_product": "whatsapp", "to": to, "type": "image", "image": {"link": link, "caption": caption}}
         )
 
+    async def send_audio(self, to: str, link: str) -> dict:
+        # WhatsApp's audio message object has no caption field, unlike image/document.
+        return await self._post({"messaging_product": "whatsapp", "to": to, "type": "audio", "audio": {"link": link}})
+
     async def send_document(self, to: str, link: str, filename: str, caption: str = "") -> dict:
         return await self._post(
             {

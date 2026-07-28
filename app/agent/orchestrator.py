@@ -6,17 +6,23 @@ turn context (see system_prompt.build_turn_context), not a routed action."""
 
 import json
 import logging
+import time
 from typing import Any
 
 from app.agent import memory
+from app.agent.language import detect_regional_language
 from app.agent.registry import get_tool_fn, get_tool_schemas, is_tool_allowed_for_role, is_tool_allowed_for_tier
 from app.agent.system_prompt import build_system_prompt, build_turn_context
 from app.deps import AppContext
 from app.ingestion.context import AgentContext, mark_onboarding_complete_if_needed
 from app.ingestion.webhook import ExtractedMessage
+from app.integrations.google_tts import SUPPORTED_LANGUAGES, synthesize_speech
 from app.integrations.openai_client import chat_with_tools
+from app.integrations.supabase_client import sign_storage_url, upload_to_storage
 
 logger = logging.getLogger(__name__)
+
+VOICE_REPLIES_BUCKET = "voice-replies"
 
 # Tool result `mode` values whose side effect (an already-sent WhatsApp
 # message) should suppress the agent's own reply text — ports `AI Response
@@ -68,7 +74,25 @@ async def run_agent_turn(
     phone = agent_ctx.profile["phone_number"]
     role = agent_ctx.role
 
-    system_prompt = build_system_prompt(role, is_subscriber=agent_ctx.is_subscriber)
+    # A voice-note reply is only attempted for a Subscriber's own voice note, and
+    # only once the feature is actually configured (google_tts_api_key) -- detected
+    # BEFORE the system prompt is built so the model is firmly told to reply in
+    # that language this turn, guaranteeing the text and the audio synthesized
+    # from it afterward are in the same language (see build_system_prompt).
+    voice_reply_language_code: str | None = None
+    if role != "vet" and agent_ctx.is_subscriber and extracted.message_type == "audio" and ctx.settings.google_tts_api_key:
+        try:
+            detected = await detect_regional_language(ctx.openai, ctx.settings, media_context)
+            if detected != "en":
+                voice_reply_language_code = detected
+        except Exception:
+            logger.exception("Voice-reply language detection failed for phone=%s", phone)
+
+    system_prompt = build_system_prompt(
+        role,
+        is_subscriber=agent_ctx.is_subscriber,
+        voice_reply_language=SUPPORTED_LANGUAGES.get(voice_reply_language_code) if voice_reply_language_code else None,
+    )
     turn_context = build_turn_context(agent_ctx, extracted, media_context, document_filing_status)
     # Persistent memory is a Subscriber perk for customers (vets always keep it --
     # this isn't a customer tier feature for them). A Free customer's chat starts
@@ -129,6 +153,20 @@ async def run_agent_turn(
 
     if final_text.strip():
         await ctx.whatsapp.send_reply_and_chunk(phone, final_text)
+
+    # Best-effort voice reply on top of the text reply already sent above -- never
+    # lets a TTS/storage/send failure affect the turn, since the customer already
+    # has their answer in text either way.
+    if voice_reply_language_code and final_text.strip():
+        try:
+            audio_bytes = await synthesize_speech(ctx.http, ctx.settings, final_text, voice_reply_language_code)
+            if audio_bytes:
+                object_path = f"{agent_ctx.profile['id']}/{int(time.time())}.mp3"
+                upload_to_storage(client, VOICE_REPLIES_BUCKET, object_path, audio_bytes, "audio/mpeg")
+                signed_url = sign_storage_url(client, VOICE_REPLIES_BUCKET, object_path)
+                await ctx.whatsapp.send_audio(phone, signed_url)
+        except Exception:
+            logger.exception("Failed to send voice reply for phone=%s", phone)
 
     # From here on the customer's reply has ALREADY been sent — everything below is
     # bookkeeping (chat history, long-term memory, conversation logs, onboarding flag).

@@ -13,6 +13,7 @@ from app.agent.system_prompt import (
     GREETING_RULE,
     SUBSCRIBER_PERSONALIZATION_RULE,
     VET_RULES,
+    VOICE_REPLY_LANGUAGE_RULE_TEMPLATE,
     _pet_name_for,
     build_system_prompt,
     build_turn_context,
@@ -51,6 +52,24 @@ def test_vet_gets_neither_personalization_rule():
     prompt = build_system_prompt("vet", is_subscriber=False)
     assert SUBSCRIBER_PERSONALIZATION_RULE not in prompt
     assert FREE_TIER_PERSONALIZATION_RULE not in prompt
+
+
+def test_subscriber_personalization_rule_covers_major_regional_languages_not_just_hindi():
+    for language in ("Hindi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali", "Marathi", "Gujarati", "Punjabi", "Urdu"):
+        assert language in SUBSCRIBER_PERSONALIZATION_RULE
+
+
+def test_voice_reply_language_rule_only_applies_to_subscriber_with_a_detected_language():
+    prompt = build_system_prompt("customer", is_subscriber=True, voice_reply_language="Tamil")
+    assert VOICE_REPLY_LANGUAGE_RULE_TEMPLATE.format(language="Tamil") in prompt
+
+    # No detected language -> no override, even for a Subscriber.
+    prompt_no_language = build_system_prompt("customer", is_subscriber=True, voice_reply_language=None)
+    assert VOICE_REPLY_LANGUAGE_RULE_TEMPLATE.format(language="Tamil") not in prompt_no_language
+
+    # Free tier never gets the voice-reply override even if a language was somehow detected.
+    prompt_free = build_system_prompt("customer", is_subscriber=False, voice_reply_language="Tamil")
+    assert VOICE_REPLY_LANGUAGE_RULE_TEMPLATE.format(language="Tamil") not in prompt_free
 
 
 def test_general_pet_qa_is_explicitly_in_scope_for_customers():

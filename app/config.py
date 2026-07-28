@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # everything, never silently open) until this is actually configured.
     admin_api_token: str = ""
 
+    # Google Cloud Text-to-Speech (regional-language voice replies for Subscribers
+    # who send a voice note -- see app/integrations/google_tts.py). Empty means
+    # the feature is silently inactive, not a hard failure.
+    google_tts_api_key: str = ""
+
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 

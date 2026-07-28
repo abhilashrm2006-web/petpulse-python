@@ -384,3 +384,230 @@ async def test_subscriber_gets_pet_scoped_memory(monkeypatch):
 
     assert load_calls == ["pet-1"]
     assert append_calls and append_calls[0].get("pet_id") == "pet-1"
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_sent_for_subscriber_voice_note_in_regional_language(monkeypatch):
+    """The actual feature: a Subscriber who sends a voice note gets a spoken
+    reply back in the language they spoke, on top of the usual text reply."""
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    detect_mock = AsyncMock(return_value="ta")
+    synthesize_mock = AsyncMock(return_value=b"fake-mp3-bytes")
+    monkeypatch.setattr(orchestrator, "detect_regional_language", detect_mock)
+    monkeypatch.setattr(orchestrator, "synthesize_speech", synthesize_mock)
+    monkeypatch.setattr(orchestrator, "upload_to_storage", MagicMock())
+    monkeypatch.setattr(orchestrator, "sign_storage_url", MagicMock(return_value="https://signed.example/reply.mp3"))
+
+    responses = [_fake_response("Namaste, Rex ஆரோக்கியமாக இருக்கிறார்.", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    ctx = AppContext(
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.voice1",
+        timestamp="1700000010", message_type="audio", text="",
+    )
+
+    result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted, media_context="[Voice note analysis] என் நாய் சரியில்லை")
+
+    detect_mock.assert_awaited_once()
+    synthesize_mock.assert_awaited_once_with(ctx.http, settings, result, "ta")
+    ctx.whatsapp.send_audio.assert_awaited_once_with("919876543210", "https://signed.example/reply.mp3")
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_not_sent_for_text_message(monkeypatch):
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    detect_mock = AsyncMock(return_value="ta")
+    monkeypatch.setattr(orchestrator, "detect_regional_language", detect_mock)
+    monkeypatch.setattr(orchestrator, "synthesize_speech", AsyncMock(return_value=b"bytes"))
+
+    responses = [_fake_response("Sure thing.", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    ctx = AppContext(
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.text1",
+        timestamp="1700000011", message_type="text", text="how is Rex doing",
+    )
+
+    await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    detect_mock.assert_not_awaited()
+    ctx.whatsapp.send_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_not_sent_for_free_tier_voice_note(monkeypatch):
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+
+    detect_mock = AsyncMock(return_value="ta")
+    monkeypatch.setattr(orchestrator, "detect_regional_language", detect_mock)
+    monkeypatch.setattr(orchestrator, "synthesize_speech", AsyncMock(return_value=b"bytes"))
+
+    responses = [_fake_response("Here's some general advice.", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    ctx = AppContext(
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=False)  # Free tier
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.voice2",
+        timestamp="1700000012", message_type="audio", text="",
+    )
+
+    await orchestrator.run_agent_turn(ctx, agent_ctx, extracted, media_context="[Voice note analysis] hello")
+
+    detect_mock.assert_not_awaited()
+    ctx.whatsapp.send_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_not_sent_when_google_tts_not_configured(monkeypatch):
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    detect_mock = AsyncMock(return_value="ta")
+    monkeypatch.setattr(orchestrator, "detect_regional_language", detect_mock)
+    monkeypatch.setattr(orchestrator, "synthesize_speech", AsyncMock(return_value=b"bytes"))
+
+    responses = [_fake_response("Sure thing.", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="")  # not configured
+    ctx = AppContext(
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.voice3",
+        timestamp="1700000013", message_type="audio", text="",
+    )
+
+    await orchestrator.run_agent_turn(ctx, agent_ctx, extracted, media_context="[Voice note analysis] hello")
+
+    detect_mock.assert_not_awaited()
+    ctx.whatsapp.send_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_not_sent_when_detected_language_is_english(monkeypatch):
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    monkeypatch.setattr(orchestrator, "detect_regional_language", AsyncMock(return_value="en"))
+    synthesize_mock = AsyncMock(return_value=b"bytes")
+    monkeypatch.setattr(orchestrator, "synthesize_speech", synthesize_mock)
+
+    responses = [_fake_response("Sure thing.", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    ctx = AppContext(
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.voice4",
+        timestamp="1700000014", message_type="audio", text="",
+    )
+
+    await orchestrator.run_agent_turn(ctx, agent_ctx, extracted, media_context="[Voice note analysis] hello there")
+
+    synthesize_mock.assert_not_awaited()
+    ctx.whatsapp.send_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_voice_reply_failure_does_not_break_the_turn(monkeypatch):
+    """synthesize_speech returning None (any TTS/API failure) must still
+    leave the already-sent text reply intact -- no exception, no crash."""
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    monkeypatch.setattr(orchestrator, "detect_regional_language", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(orchestrator, "synthesize_speech", AsyncMock(return_value=None))
+
+    responses = [_fake_response("Sure thing.", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    ctx = AppContext(
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.voice5",
+        timestamp="1700000015", message_type="audio", text="",
+    )
+
+    result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted, media_context="[Voice note analysis] namaste")
+
+    assert result == "Sure thing."
+    ctx.whatsapp.send_reply_and_chunk.assert_awaited_once()
+    ctx.whatsapp.send_audio.assert_not_awaited()

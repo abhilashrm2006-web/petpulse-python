@@ -16,9 +16,11 @@ class _FakeHttpClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = 0
+        self.last_payload = None
 
     async def post(self, url, headers, json):
         self.calls += 1
+        self.last_payload = json
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -91,3 +93,15 @@ async def test_gives_up_after_max_attempts(monkeypatch):
         await client.send_text("919000000001", "hello")
 
     assert fake.calls == whatsapp.SEND_MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_send_audio_posts_link_based_audio_message():
+    fake = _FakeHttpClient([_ok_response({"messages": [{"id": "wamid.audio1"}]})])
+    client = WhatsAppClient(Settings(), fake)
+
+    result = await client.send_audio("919000000001", "https://example.com/voice-reply.mp3")
+
+    assert result["messages"][0]["id"] == "wamid.audio1"
+    assert fake.last_payload["type"] == "audio"
+    assert fake.last_payload["audio"] == {"link": "https://example.com/voice-reply.mp3"}

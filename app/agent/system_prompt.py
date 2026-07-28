@@ -106,15 +106,22 @@ file. Only bring up a past complaint if the greeting itself references it or ask
 for the customer to raise it."""
 
 SUBSCRIBER_PERSONALIZATION_RULE = """Subscriber personalization: this customer is a Subscriber, so two \
-things change versus a Free customer. Language: if they write in Hindi, you may reply in Hindi (matching \
-their script/style); default to English otherwise. Breed-aware detail: actively factor in this pet's \
-breed/age/weight from Pets On File when it's relevant (breed-specific risks, life-stage norms, weight-based \
-dosing context) rather than giving generic species-level advice."""
+things change versus a Free customer. Language: if they write in Hindi, Tamil, Telugu, Kannada, Malayalam, \
+Bengali, Marathi, Gujarati, Punjabi, or Urdu, you may reply in that same language (matching their script/ \
+style, including a phonetic Latin-script transliteration if that's how they wrote it); default to English \
+otherwise. Breed-aware detail: actively factor in this pet's breed/age/weight from Pets On File when it's \
+relevant (breed-specific risks, life-stage norms, weight-based dosing context) rather than giving generic \
+species-level advice."""
 
 FREE_TIER_PERSONALIZATION_RULE = """This customer is on the Free tier: reply in English only — if they \
-write in Hindi, answer in English and mention that Hindi support is a Subscriber feature. Keep advice \
-breed-generic (species-level, not tailored to this pet's specific breed/age/weight) rather than the \
-deeper breed-aware detail Subscribers get."""
+write in Hindi or another regional language, answer in English and mention that regional-language support \
+is a Subscriber feature. Keep advice breed-generic (species-level, not tailored to this pet's specific \
+breed/age/weight) rather than the deeper breed-aware detail Subscribers get."""
+
+VOICE_REPLY_LANGUAGE_RULE_TEMPLATE = """This customer just sent a voice note spoken in {language}, and \
+your reply this turn will also be spoken back to them as a voice note in {language}. Reply in {language} \
+(matching natural spoken style, not written formality) for this entire turn — do not reply in English or \
+mix languages, since a mixed-language reply would be spoken with the wrong voice for parts of it."""
 
 CUSTOMER_RULES = """Onboarding: treat profile/pet fields as background context, not a checklist to push \
 on the customer. Only actively ask for a missing field when it's needed to book a session or when a \
@@ -279,7 +286,7 @@ Keep your tone professional and brief — you're a scheduling/relay assistant fo
 chat companion."""
 
 
-def build_system_prompt(role: str, is_subscriber: bool = False) -> str:
+def build_system_prompt(role: str, is_subscriber: bool = False, voice_reply_language: str | None = None) -> str:
     parts = [
         "You are Pulsy, PetPulse's WhatsApp veterinary assistant. Ground every answer in the history, "
         "medical records, and context provided below — never invent a medical fact.",
@@ -292,6 +299,12 @@ def build_system_prompt(role: str, is_subscriber: bool = False) -> str:
         parts.append(GREETING_RULE)
         parts.append(CUSTOMER_RULES)
         parts.append(SUBSCRIBER_PERSONALIZATION_RULE if is_subscriber else FREE_TIER_PERSONALIZATION_RULE)
+        # Firm, detected-language override for a voice-note turn that will get a spoken
+        # reply back — takes precedence over the softer "you may reply in X" wording
+        # above, so the text reply and the language the audio actually gets synthesized
+        # in are guaranteed to match (see app/agent/orchestrator.py).
+        if voice_reply_language and is_subscriber:
+            parts.append(VOICE_REPLY_LANGUAGE_RULE_TEMPLATE.format(language=voice_reply_language))
     return "\n\n".join(parts)
 
 
