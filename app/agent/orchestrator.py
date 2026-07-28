@@ -10,14 +10,13 @@ import time
 from typing import Any
 
 from app.agent import memory
-from app.agent.language import detect_regional_language
+from app.agent.language import SUPPORTED_LANGUAGES, detect_regional_language
 from app.agent.registry import get_tool_fn, get_tool_schemas, is_tool_allowed_for_role, is_tool_allowed_for_tier
 from app.agent.system_prompt import build_system_prompt, build_turn_context
 from app.deps import AppContext
 from app.ingestion.context import AgentContext, mark_onboarding_complete_if_needed
 from app.ingestion.webhook import ExtractedMessage
-from app.integrations.google_tts import SUPPORTED_LANGUAGES, synthesize_speech
-from app.integrations.openai_client import chat_with_tools
+from app.integrations.openai_client import chat_with_tools, synthesize_speech
 from app.integrations.supabase_client import sign_storage_url, upload_to_storage
 
 logger = logging.getLogger(__name__)
@@ -75,12 +74,13 @@ async def run_agent_turn(
     role = agent_ctx.role
 
     # A voice-note reply is only attempted for a Subscriber's own voice note, and
-    # only once the feature is actually configured (google_tts_api_key) -- detected
-    # BEFORE the system prompt is built so the model is firmly told to reply in
-    # that language this turn, guaranteeing the text and the audio synthesized
-    # from it afterward are in the same language (see build_system_prompt).
+    # only while the feature is enabled (settings.voice_replies_enabled, an ops-level
+    # kill-switch) -- detected BEFORE the system prompt is built so the model is
+    # firmly told to reply in that language this turn, guaranteeing the text and
+    # the audio synthesized from it afterward are in the same language (see
+    # build_system_prompt).
     voice_reply_language_code: str | None = None
-    if role != "vet" and agent_ctx.is_subscriber and extracted.message_type == "audio" and ctx.settings.google_tts_api_key:
+    if role != "vet" and agent_ctx.is_subscriber and extracted.message_type == "audio" and ctx.settings.voice_replies_enabled:
         try:
             detected = await detect_regional_language(ctx.openai, ctx.settings, media_context)
             if detected != "en":
@@ -159,7 +159,7 @@ async def run_agent_turn(
     # has their answer in text either way.
     if voice_reply_language_code and final_text.strip():
         try:
-            audio_bytes = await synthesize_speech(ctx.http, ctx.settings, final_text, voice_reply_language_code)
+            audio_bytes = await synthesize_speech(ctx.openai, ctx.settings, final_text)
             if audio_bytes:
                 object_path = f"{agent_ctx.profile['id']}/{int(time.time())}.mp3"
                 upload_to_storage(client, VOICE_REPLIES_BUCKET, object_path, audio_bytes, "audio/mpeg")

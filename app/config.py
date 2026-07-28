@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     openai_audio_model: str = "gpt-audio"
     openai_agent_max_tokens: int = 5600
     openai_agent_max_iterations: int = 10
+    # TTS for regional-language voice replies (see app/integrations/openai_client.py
+    # synthesize_speech) -- reuses the OpenAI account already in use, no separate
+    # provider/API key needed. "tts-1" over "tts-1-hd" for lower per-reply cost;
+    # bump to "gpt-4o-mini-tts" for better quality if it's ever worth it.
+    openai_tts_model: str = "tts-1"
+    openai_tts_voice: str = "alloy"
+    voice_replies_enabled: bool = True
 
     # Supabase
     supabase_url: str = ""
@@ -58,11 +65,6 @@ class Settings(BaseSettings):
     # require_admin_token. Empty means the admin API fails closed (401 on
     # everything, never silently open) until this is actually configured.
     admin_api_token: str = ""
-
-    # Google Cloud Text-to-Speech (regional-language voice replies for Subscribers
-    # who send a voice note -- see app/integrations/google_tts.py). Empty means
-    # the feature is silently inactive, not a hard failure.
-    google_tts_api_key: str = ""
 
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"

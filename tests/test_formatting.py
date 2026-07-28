@@ -1,4 +1,4 @@
-from app.utils.formatting import split_into_chunks, to_whatsapp_markdown
+from app.utils.formatting import split_into_chunks, strip_for_speech, to_whatsapp_markdown
 
 
 def test_bold_conversion():
@@ -29,3 +29,8 @@ def test_long_paragraph_splits_on_sentence_boundaries():
 
 def test_empty_text_returns_no_chunks():
     assert split_into_chunks("") == []
+
+
+def test_strip_for_speech_removes_whatsapp_markdown():
+    assert strip_for_speech("*Seriousness:* 🟡 Moderate (3/5)") == "Seriousness: 🟡 Moderate (3/5)"
+    assert strip_for_speech("some `code` and _emphasis_ and ~strike~") == "some code and emphasis and strike"

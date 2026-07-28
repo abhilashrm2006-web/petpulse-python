@@ -3,11 +3,18 @@ smaller reasoning/vision/audio calls used by the media pipeline and document
 classifier (spec §1, §2, §5). Model names are configurable but default to
 what the live n8n system already uses successfully."""
 
+import logging
 from typing import Any
 
 from openai import AsyncOpenAI
 
 from app.config import Settings
+from app.utils.formatting import strip_for_speech
+
+logger = logging.getLogger(__name__)
+
+# OpenAI's /v1/audio/speech input cap is 4096 characters.
+MAX_TTS_INPUT_CHARS = 4000
 
 
 def make_openai_client(settings: Settings) -> AsyncOpenAI:
@@ -101,6 +108,34 @@ async def vision_completion(
         ],
     )
     return resp.choices[0].message.content or ""
+
+
+async def synthesize_speech(client: AsyncOpenAI, settings: Settings, text: str) -> bytes | None:
+    """Text-to-speech for regional-language voice replies (see
+    app/agent/orchestrator.py) -- reuses the OpenAI account already paid for
+    rather than a separate provider. OpenAI's TTS model reads the input in
+    whatever language it's written in; the caller is responsible for having
+    already generated `text` in the customer's language (see
+    app/agent/system_prompt.py VOICE_REPLY_LANGUAGE_RULE_TEMPLATE), so no
+    per-language voice selection is needed here. Returns None on any
+    failure -- a voice reply is always best-effort on top of the text reply
+    that's already been sent, never something that can break the turn."""
+    if not settings.voice_replies_enabled:
+        return None
+    spoken_text = strip_for_speech(text)[:MAX_TTS_INPUT_CHARS]
+    if not spoken_text:
+        return None
+    try:
+        resp = await client.audio.speech.create(
+            model=settings.openai_tts_model,
+            voice=settings.openai_tts_voice,
+            input=spoken_text,
+            response_format="mp3",
+        )
+        return resp.content
+    except Exception:
+        logger.exception("OpenAI TTS synthesis failed")
+        return None
 
 
 async def transcribe_audio(client: AsyncOpenAI, audio_bytes: bytes, filename: str = "audio.ogg") -> str:

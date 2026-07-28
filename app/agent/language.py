@@ -11,10 +11,25 @@ import logging
 from openai import AsyncOpenAI
 
 from app.config import Settings
-from app.integrations.google_tts import SUPPORTED_LANGUAGES
 from app.integrations.openai_client import json_completion
 
 logger = logging.getLogger(__name__)
+
+# The 10 major Indian regional languages this feature supports, beyond the
+# Hindi-only text personalization that existed before it (see
+# app/agent/system_prompt.py SUBSCRIBER_PERSONALIZATION_RULE).
+SUPPORTED_LANGUAGES: dict[str, str] = {
+    "hi": "Hindi",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "bn": "Bengali",
+    "mr": "Marathi",
+    "gu": "Gujarati",
+    "pa": "Punjabi",
+    "ur": "Urdu",
+}
 
 _LANGUAGE_LIST = ", ".join(f'"{code}" ({name})' for code, name in SUPPORTED_LANGUAGES.items())
 

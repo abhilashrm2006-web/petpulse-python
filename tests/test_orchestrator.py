@@ -410,7 +410,7 @@ async def test_voice_reply_sent_for_subscriber_voice_note_in_regional_language(m
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
 
-    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    settings = Settings(openai_agent_max_iterations=10, voice_replies_enabled=True)
     ctx = AppContext(
         settings=settings, http=None,
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
@@ -425,7 +425,7 @@ async def test_voice_reply_sent_for_subscriber_voice_note_in_regional_language(m
     result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted, media_context="[Voice note analysis] என் நாய் சரியில்லை")
 
     detect_mock.assert_awaited_once()
-    synthesize_mock.assert_awaited_once_with(ctx.http, settings, result, "ta")
+    synthesize_mock.assert_awaited_once_with(ctx.openai, settings, result)
     ctx.whatsapp.send_audio.assert_awaited_once_with("919876543210", "https://signed.example/reply.mp3")
 
 
@@ -448,7 +448,7 @@ async def test_voice_reply_not_sent_for_text_message(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
 
-    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    settings = Settings(openai_agent_max_iterations=10, voice_replies_enabled=True)
     ctx = AppContext(
         settings=settings, http=None,
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
@@ -482,7 +482,7 @@ async def test_voice_reply_not_sent_for_free_tier_voice_note(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
 
-    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    settings = Settings(openai_agent_max_iterations=10, voice_replies_enabled=True)
     ctx = AppContext(
         settings=settings, http=None,
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
@@ -501,7 +501,7 @@ async def test_voice_reply_not_sent_for_free_tier_voice_note(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_voice_reply_not_sent_when_google_tts_not_configured(monkeypatch):
+async def test_voice_reply_not_sent_when_voice_replies_disabled(monkeypatch):
     monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
     monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
     monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
@@ -519,7 +519,7 @@ async def test_voice_reply_not_sent_when_google_tts_not_configured(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
 
-    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="")  # not configured
+    settings = Settings(openai_agent_max_iterations=10, voice_replies_enabled=False)
     ctx = AppContext(
         settings=settings, http=None,
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
@@ -556,7 +556,7 @@ async def test_voice_reply_not_sent_when_detected_language_is_english(monkeypatc
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
 
-    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    settings = Settings(openai_agent_max_iterations=10, voice_replies_enabled=True)
     ctx = AppContext(
         settings=settings, http=None,
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
@@ -594,7 +594,7 @@ async def test_voice_reply_failure_does_not_break_the_turn(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
 
-    settings = Settings(openai_agent_max_iterations=10, google_tts_api_key="test-key")
+    settings = Settings(openai_agent_max_iterations=10, voice_replies_enabled=True)
     ctx = AppContext(
         settings=settings, http=None,
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),

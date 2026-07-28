@@ -13,6 +13,15 @@ def to_whatsapp_markdown(text: str) -> str:
     return text.strip()
 
 
+def strip_for_speech(text: str) -> str:
+    """WhatsApp markdown (*bold*) and stray formatting reads badly aloud --
+    strip it before TTS synthesis rather than speaking literal asterisks
+    (see app/integrations/openai_client.py synthesize_speech)."""
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"[_~`]", "", text)
+    return text.strip()
+
+
 def split_into_chunks(text: str, budget: int = CHUNK_BUDGET) -> list[str]:
     """Split on blank lines into paragraphs; any paragraph over `budget`
     chars is further split on sentence boundaries and re-accumulated up to
