@@ -18,6 +18,15 @@ def test_non_gated_tool_allowed_for_free_customer():
     assert is_tool_allowed_for_tier("save_onboarding_field", "customer", is_subscriber=False) is True
 
 
+def test_data_deletion_tools_are_open_to_free_customers():
+    from app.agent.registry import is_tool_allowed_for_role
+
+    for name in ("request_data_deletion", "respond_to_deletion_confirmation", "record_deletion_feedback"):
+        assert is_tool_allowed_for_tier(name, "customer", is_subscriber=False) is True
+        assert is_tool_allowed_for_role(name, "customer") is True
+        assert is_tool_allowed_for_role(name, "vet") is False
+
+
 def test_check_symptoms_is_open_to_free_and_subscriber_alike():
     """The triage assessment itself is never paywalled -- only booking an
     actual consultation is Subscriber-gated (see book_slot above)."""

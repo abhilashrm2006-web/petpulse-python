@@ -152,7 +152,10 @@ async def test_self_messaging_tool_suppresses_final_text(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["booked", "rescheduled", "prescription_delivered", "declined"])
+@pytest.mark.parametrize(
+    "mode",
+    ["booked", "rescheduled", "prescription_delivered", "declined", "deletion_confirmation_sent", "deletion_done", "deletion_declined"],
+)
 async def test_booking_confirmation_suppresses_duplicate_agent_reply(monkeypatch, mode):
     """Reproduces a real reported bug: _finalize_booking already sends the
     full confirmation (date/time + Meet link) directly to both parties, but
@@ -163,7 +166,9 @@ async def test_booking_confirmation_suppresses_duplicate_agent_reply(monkeypatch
     already sends the text/PDF directly. "declined" is the same class again,
     found via a repeated-message audit: decline_session unconditionally
     messages BOTH the customer and the doctor directly, so whichever one is
-    the current actor already got the tool's own message too."""
+    the current actor already got the tool's own message too. The
+    "deletion_*" modes are the chat-history-deletion flow (app/agent/tools/
+    account.py), which also messages the customer directly at every step."""
 
     async def fake_tool(ctx, agent_ctx, **kwargs):
         return {"success": True, "mode": mode, "session_id": "s1", "when": "Tue 28 Jul, 11:30 AM IST", "meet_link": "https://meet.google.com/abc"}

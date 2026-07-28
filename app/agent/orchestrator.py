@@ -42,9 +42,16 @@ VOICE_REPLIES_BUCKET = "voice-replies"
 # party" — whichever of the two is the current actor gets messaged by the tool
 # too), so without suppression that actor got the tool's own message plus a
 # redundant agent reply on top of it.
+# "deletion_confirmation_sent"/"deletion_done"/"deletion_declined": the chat-
+# history-deletion flow (app/agent/tools/account.py) sends its own WhatsApp
+# message directly at every step (the confirmation prompt, the "done"
+# message, and the "why?" prompt on decline) — same class of bug as above if
+# left unsuppressed. "feedback_recorded" is deliberately NOT in this set: it
+# doesn't message anyone itself, the agent's own brief thank-you IS the reply.
 SELF_MESSAGING_MODES = {
     "doctor_catalogue_sent", "new_parent_guide_sent", "slot_list_sent", "booked", "rescheduled", "payment_requested",
     "prescription_delivered", "subscriber_consult_confirmed", "subscription_started", "declined",
+    "deletion_confirmation_sent", "deletion_done", "deletion_declined",
 }
 
 SUBSCRIBER_ONLY_MESSAGE = (

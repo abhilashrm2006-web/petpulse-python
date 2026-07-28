@@ -7,7 +7,7 @@ made by the same LLM loop."""
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from app.agent.tools import booking, documents, onboarding, pet_members, pet_parent_guide, subscriptions, symptoms, vets
+from app.agent.tools import account, booking, documents, onboarding, pet_members, pet_parent_guide, subscriptions, symptoms, vets
 
 
 @dataclass
@@ -363,6 +363,37 @@ TOOL_SPECS: list[ToolSpec] = [
         {},
         [],
         subscriptions.start_subscription,
+        CUSTOMER,
+    ),
+    _spec(
+        "request_data_deletion",
+        "Customer asked to delete/clear/reset their profile, chat, or data — sends a Yes/No confirmation "
+        "over WhatsApp before anything happens. Never delete or clear anything yourself without this "
+        "confirmation step.",
+        {},
+        [],
+        account.request_data_deletion,
+        CUSTOMER,
+    ),
+    _spec(
+        "respond_to_deletion_confirmation",
+        "Record the customer's answer to the deletion confirmation request_data_deletion sent — a button tap "
+        "or a plain yes/no reply both count. 'Yes' actually clears their chat history (not their pet/account "
+        "data) and confirms it; 'No' cancels and asks them why, already sent — don't call this a second time "
+        "for the same request.",
+        {"confirm": {"type": "boolean", "description": "true if they confirmed clearing their chat, false if they backed out."}},
+        ["confirm"],
+        account.respond_to_deletion_confirmation,
+        CUSTOMER,
+    ),
+    _spec(
+        "record_deletion_feedback",
+        "Log the reason a customer gave for wanting to clear their chat, after they declined via "
+        "respond_to_deletion_confirmation and were asked why. Call this once, using their own words, then "
+        "just thank them briefly — don't restate or analyze their reason back to them.",
+        {"reason": _STR},
+        ["reason"],
+        account.record_deletion_feedback,
         CUSTOMER,
     ),
 ]
