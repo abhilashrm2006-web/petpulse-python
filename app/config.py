@@ -66,10 +66,12 @@ class Settings(BaseSettings):
     # everything, never silently open) until this is actually configured.
     admin_api_token: str = ""
 
-    # Pulsy mascot welcome image, sent once per conversation on a bare greeting
-    # (see app/agent/tools/greeting.py, GREETING_RULE). Public Supabase Storage
-    # object -- no signed URL/expiry needed, it's a static brand asset.
-    pulsy_welcome_image_url: str = "https://ngxjkxqualvhkyyjckvs.supabase.co/storage/v1/object/public/brand-assets/pulsy-welcome.png"
+    # Pulsy mascot welcome clip, sent once per conversation on a bare greeting
+    # (see app/agent/tools/greeting.py, GREETING_RULE). A short looping zoom/pulse
+    # animation (ffmpeg zoompan over the static mascot art), sent as a WhatsApp
+    # video message since WhatsApp doesn't animate a plain image. Public Supabase
+    # Storage object -- no signed URL/expiry needed, it's a static brand asset.
+    pulsy_welcome_video_url: str = "https://ngxjkxqualvhkyyjckvs.supabase.co/storage/v1/object/public/brand-assets/pulsy-welcome.mp4"
 
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"

@@ -105,3 +105,15 @@ async def test_send_audio_posts_link_based_audio_message():
     assert result["messages"][0]["id"] == "wamid.audio1"
     assert fake.last_payload["type"] == "audio"
     assert fake.last_payload["audio"] == {"link": "https://example.com/voice-reply.mp3"}
+
+
+@pytest.mark.asyncio
+async def test_send_video_posts_link_based_video_message():
+    fake = _FakeHttpClient([_ok_response({"messages": [{"id": "wamid.video1"}]})])
+    client = WhatsAppClient(Settings(), fake)
+
+    result = await client.send_video("919000000001", "https://example.com/pulsy-welcome.mp4")
+
+    assert result["messages"][0]["id"] == "wamid.video1"
+    assert fake.last_payload["type"] == "video"
+    assert fake.last_payload["video"] == {"link": "https://example.com/pulsy-welcome.mp4", "caption": ""}
