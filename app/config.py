@@ -25,10 +25,12 @@ class Settings(BaseSettings):
     openai_agent_max_iterations: int = 10
     # TTS for regional-language voice replies (see app/integrations/openai_client.py
     # synthesize_speech) -- reuses the OpenAI account already in use, no separate
-    # provider/API key needed. "tts-1" over "tts-1-hd" for lower per-reply cost;
-    # bump to "gpt-4o-mini-tts" for better quality if it's ever worth it.
-    openai_tts_model: str = "tts-1"
-    openai_tts_voice: str = "alloy"
+    # provider/API key needed. gpt-4o-mini-tts (not tts-1) because it supports the
+    # `instructions` param, needed to steer a native Indian accent instead of the
+    # anglicized default -- confirmed via a user-judged 5-way A/B sample (nova was
+    # the pick). Requires openai>=2.x (see requirements.txt).
+    openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_tts_voice: str = "nova"
     voice_replies_enabled: bool = True
 
     # Supabase

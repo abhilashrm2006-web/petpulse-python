@@ -110,16 +110,30 @@ async def vision_completion(
     return resp.choices[0].message.content or ""
 
 
-async def synthesize_speech(client: AsyncOpenAI, settings: Settings, text: str) -> bytes | None:
+TTS_ACCENT_INSTRUCTIONS_TEMPLATE = (
+    "Speak as a warm, friendly native {language} speaker from India, in natural conversational {language}. "
+    "Use authentic Indian pronunciation and intonation throughout, the way a caring Indian pet owner or vet "
+    "assistant would actually speak to a friend over the phone — not an anglicized or foreign accent."
+)
+
+
+async def synthesize_speech(client: AsyncOpenAI, settings: Settings, text: str, language: str = "Hindi") -> bytes | None:
     """Text-to-speech for regional-language voice replies (see
     app/agent/orchestrator.py) -- reuses the OpenAI account already paid for
     rather than a separate provider. OpenAI's TTS model reads the input in
     whatever language it's written in; the caller is responsible for having
     already generated `text` in the customer's language (see
-    app/agent/system_prompt.py VOICE_REPLY_LANGUAGE_RULE_TEMPLATE), so no
-    per-language voice selection is needed here. Returns None on any
-    failure -- a voice reply is always best-effort on top of the text reply
-    that's already been sent, never something that can break the turn."""
+    app/agent/system_prompt.py VOICE_REPLY_LANGUAGE_RULE_TEMPLATE).
+
+    `language` steers accent/delivery via gpt-4o-mini-tts's `instructions`
+    param -- confirmed live (user-verified A/B sample) that without this, the
+    older tts-1 voices (and gpt-4o-mini-tts with no instructions) read Indian
+    regional-language text with a distinctly foreign/anglicized accent; the
+    instructions steer it to sound like an actual native speaker instead.
+    `voice`/`model` picked the same way (nova was the user's pick among 5
+    A/B samples). Returns None on any failure -- a voice reply is always
+    best-effort on top of the text reply that's already been sent, never
+    something that can break the turn."""
     if not settings.voice_replies_enabled:
         return None
     spoken_text = strip_for_speech(text)[:MAX_TTS_INPUT_CHARS]
@@ -130,6 +144,7 @@ async def synthesize_speech(client: AsyncOpenAI, settings: Settings, text: str) 
             model=settings.openai_tts_model,
             voice=settings.openai_tts_voice,
             input=spoken_text,
+            instructions=TTS_ACCENT_INSTRUCTIONS_TEMPLATE.format(language=language),
             response_format="mp3",
         )
         return resp.content

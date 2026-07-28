@@ -4,7 +4,7 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 httpx==0.28.1
 supabase==2.11.0
-openai==1.59.6
+openai==2.49.0
 apscheduler==3.11.0
 pymupdf==1.25.2
 fpdf2==2.8.2

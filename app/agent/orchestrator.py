@@ -100,10 +100,11 @@ async def run_agent_turn(
         except Exception:
             logger.exception("Voice-reply language detection failed for phone=%s", phone)
 
+    voice_reply_language_name = SUPPORTED_LANGUAGES.get(voice_reply_language_code) if voice_reply_language_code else None
     system_prompt = build_system_prompt(
         role,
         is_subscriber=agent_ctx.is_subscriber,
-        voice_reply_language=SUPPORTED_LANGUAGES.get(voice_reply_language_code) if voice_reply_language_code else None,
+        voice_reply_language=voice_reply_language_name,
     )
     turn_context = build_turn_context(agent_ctx, extracted, media_context, document_filing_status)
     # Persistent memory is a Subscriber perk for customers (vets always keep it --
@@ -172,7 +173,7 @@ async def run_agent_turn(
     # has their answer in text either way.
     if voice_reply_language_code and final_text.strip():
         try:
-            audio_bytes = await synthesize_speech(ctx.openai, ctx.settings, final_text)
+            audio_bytes = await synthesize_speech(ctx.openai, ctx.settings, final_text, language=voice_reply_language_name)
             if audio_bytes:
                 object_path = f"{agent_ctx.profile['id']}/{int(time.time())}.mp3"
                 upload_to_storage(client, VOICE_REPLIES_BUCKET, object_path, audio_bytes, "audio/mpeg")

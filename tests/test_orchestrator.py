@@ -427,7 +427,7 @@ async def test_voice_reply_sent_for_subscriber_voice_note_in_regional_language(m
     result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted, media_context="[Voice note analysis] என் நாய் சரியில்லை")
 
     detect_mock.assert_awaited_once()
-    synthesize_mock.assert_awaited_once_with(ctx.openai, settings, result)
+    synthesize_mock.assert_awaited_once_with(ctx.openai, settings, result, language="Tamil")
     ctx.whatsapp.send_audio.assert_awaited_once_with("919876543210", "https://signed.example/reply.mp3")
 
 

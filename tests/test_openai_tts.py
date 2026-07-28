@@ -24,18 +24,37 @@ def _fake_client(audio_bytes: bytes | None = None, exc: Exception | None = None)
 @pytest.mark.asyncio
 async def test_synthesize_speech_returns_bytes_on_success():
     client, create = _fake_client(audio_bytes=b"fake-mp3-bytes")
-    settings = Settings(openai_tts_model="tts-1", openai_tts_voice="alloy")
+    settings = Settings(openai_tts_model="gpt-4o-mini-tts", openai_tts_voice="nova")
 
-    result = await synthesize_speech(client, settings, "*Namaste!* Rex is doing well.")
+    result = await synthesize_speech(client, settings, "*Namaste!* Rex is doing well.", language="Hindi")
 
     assert result == b"fake-mp3-bytes"
     create.assert_awaited_once()
     kwargs = create.call_args.kwargs
-    assert kwargs["model"] == "tts-1"
-    assert kwargs["voice"] == "alloy"
+    assert kwargs["model"] == "gpt-4o-mini-tts"
+    assert kwargs["voice"] == "nova"
     assert kwargs["response_format"] == "mp3"
     # markdown stripped before being sent for synthesis
     assert "*" not in kwargs["input"]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_speech_steers_accent_via_instructions():
+    """Confirmed via a user-judged A/B sample: without an explicit accent
+    instruction, gpt-4o-mini-tts (and the older tts-1 voices, which don't
+    support instructions at all) read Indian regional-language text with an
+    anglicized accent. `language` must be woven into the instructions sent
+    to the API so the model actually steers toward a native accent for
+    whichever language this reply is in, not a hardcoded one."""
+    client, create = _fake_client(audio_bytes=b"bytes")
+    settings = Settings()
+
+    await synthesize_speech(client, settings, "Hello", language="Tamil")
+
+    instructions = create.call_args.kwargs["instructions"]
+    assert "Tamil" in instructions
+    assert "native" in instructions.lower()
+    assert "Indian" in instructions
 
 
 @pytest.mark.asyncio
