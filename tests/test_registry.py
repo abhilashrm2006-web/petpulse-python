@@ -53,3 +53,10 @@ def test_start_subscription_is_never_tier_gated_itself():
 
 def test_unknown_tool_name_defaults_to_allowed():
     assert is_tool_allowed_for_tier("not_a_real_tool", "customer", is_subscriber=False) is True
+
+
+def test_welcome_character_tool_is_open_to_free_customers():
+    """The mascot greeting is a branding touch, not a paywalled feature --
+    every customer, Free or Subscriber, should get it."""
+    assert is_tool_allowed_for_tier("send_welcome_character", "customer", is_subscriber=False) is True
+    assert is_tool_allowed_for_tier("send_welcome_character", "customer", is_subscriber=True) is True

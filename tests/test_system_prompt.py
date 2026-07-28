@@ -8,6 +8,7 @@ reliably do so. Fix: resolve the name explicitly and state in the prompt
 that the open session is scoped to that pet only."""
 
 from app.agent.system_prompt import (
+    CASUAL_TONE_RULE,
     CUSTOMER_RULES,
     FREE_TIER_PERSONALIZATION_RULE,
     GREETING_RULE,
@@ -57,6 +58,24 @@ def test_vet_gets_neither_personalization_rule():
 def test_subscriber_personalization_rule_covers_major_regional_languages_not_just_hindi():
     for language in ("Hindi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali", "Marathi", "Gujarati", "Punjabi", "Urdu"):
         assert language in SUBSCRIBER_PERSONALIZATION_RULE
+
+
+def test_casual_tone_rule_applies_to_customers_not_vets():
+    """Vets keep a professional/brief tone (VET_RULES) -- the casual/slang
+    style is a customer-facing thing only."""
+    assert CASUAL_TONE_RULE in build_system_prompt("customer", is_subscriber=False)
+    assert CASUAL_TONE_RULE in build_system_prompt("customer", is_subscriber=True)
+    assert CASUAL_TONE_RULE not in build_system_prompt("vet")
+
+
+def test_greeting_rule_instructs_sending_the_welcome_character():
+    assert "send_welcome_character()" in GREETING_RULE
+
+
+def test_voice_reply_language_rule_asks_for_natural_spoken_style():
+    formatted = VOICE_REPLY_LANGUAGE_RULE_TEMPLATE.format(language="Tamil")
+    assert "colloquialisms/slang" in formatted
+    assert "real person talking" in formatted
 
 
 def test_voice_reply_language_rule_only_applies_to_subscriber_with_a_detected_language():

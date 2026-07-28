@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # everything, never silently open) until this is actually configured.
     admin_api_token: str = ""
 
+    # Pulsy mascot welcome image, sent once per conversation on a bare greeting
+    # (see app/agent/tools/greeting.py, GREETING_RULE). Public Supabase Storage
+    # object -- no signed URL/expiry needed, it's a static brand asset.
+    pulsy_welcome_image_url: str = "https://ngxjkxqualvhkyyjckvs.supabase.co/storage/v1/object/public/brand-assets/pulsy-welcome.png"
+
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 
