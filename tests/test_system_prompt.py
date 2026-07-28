@@ -62,6 +62,15 @@ def test_subscriber_personalization_rule_covers_major_regional_languages_not_jus
         assert language in SUBSCRIBER_PERSONALIZATION_RULE
 
 
+def test_subscriber_personalization_rule_covers_all_22_eighth_schedule_languages():
+    """Expanded from the original 10 to all 22 -- built dynamically from
+    app.agent.language.SUPPORTED_LANGUAGES so the two lists can't drift."""
+    from app.agent.language import SUPPORTED_LANGUAGES
+
+    for language in SUPPORTED_LANGUAGES.values():
+        assert language in SUBSCRIBER_PERSONALIZATION_RULE
+
+
 def test_casual_tone_rule_applies_to_customers_not_vets():
     """Vets keep a professional/brief tone (VET_RULES) -- the casual/slang
     style is a customer-facing thing only."""

@@ -4,12 +4,22 @@ identically to "no regional language detected" (see orchestrator.py)."""
 
 import pytest
 
-from app.agent.language import detect_regional_language
+from app.agent.language import SUPPORTED_LANGUAGES, detect_regional_language
 from app.config import Settings
 
 
 class _FakeOpenAI:
     pass  # detect_regional_language only ever passes this through to json_completion
+
+
+def test_supports_all_22_eighth_schedule_languages():
+    """All 22 languages in the Indian Constitution's Eighth Schedule --
+    expanded from the original 10, live-verified (real API call) that
+    gpt-5.4/gpt-4o-mini-tts produce real native-script text and audio for
+    every one of them, including the lower-resource ones."""
+    assert len(SUPPORTED_LANGUAGES) == 22
+    for code in ("as", "brx", "doi", "kok", "ks", "mai", "mni", "ne", "or", "sa", "sat", "sd"):
+        assert code in SUPPORTED_LANGUAGES
 
 
 @pytest.mark.asyncio

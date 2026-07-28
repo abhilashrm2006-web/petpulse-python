@@ -8,9 +8,16 @@ import json
 from datetime import datetime
 from typing import Any
 
+from app.agent.language import SUPPORTED_LANGUAGES
 from app.availability.slots import IST
 from app.ingestion.context import AgentContext
 from app.ingestion.webhook import ExtractedMessage
+
+# Built from SUPPORTED_LANGUAGES (app/agent/language.py) rather than hardcoded
+# here, so the text-personalization language list and the voice-reply
+# detection list can't drift out of sync with each other.
+_REGIONAL_LANGUAGE_NAMES = list(SUPPORTED_LANGUAGES.values())
+_REGIONAL_LANGUAGE_LIST_TEXT = ", ".join(_REGIONAL_LANGUAGE_NAMES[:-1]) + f", or {_REGIONAL_LANGUAGE_NAMES[-1]}"
 
 SAFETY_RULES = """GROUNDED FACTS ONLY (hard safety rule): vaccination dates, next-due dates, vaccine \
 names, batch/lot numbers, medications/doses, lab values, weights, visit dates may ONLY be stated if \
@@ -132,13 +139,12 @@ acknowledgement — never proactively recap or re-run a severity assessment for 
 Context/memory just because it's on file. Only bring up a past complaint if the greeting itself references \
 it or asks about it; otherwise wait for the customer to raise it."""
 
-SUBSCRIBER_PERSONALIZATION_RULE = """Subscriber personalization: this customer is a Subscriber, so two \
-things change versus a Free customer. Language: if they write in Hindi, Tamil, Telugu, Kannada, Malayalam, \
-Bengali, Marathi, Gujarati, Punjabi, or Urdu, you may reply in that same language (matching their script/ \
-style, including a phonetic Latin-script transliteration if that's how they wrote it); default to English \
-otherwise. Breed-aware detail: actively factor in this pet's breed/age/weight from Pets On File when it's \
-relevant (breed-specific risks, life-stage norms, weight-based dosing context) rather than giving generic \
-species-level advice."""
+SUBSCRIBER_PERSONALIZATION_RULE = f"""Subscriber personalization: this customer is a Subscriber, so two \
+things change versus a Free customer. Language: if they write in {_REGIONAL_LANGUAGE_LIST_TEXT}, you may \
+reply in that same language (matching their script/style, including a phonetic Latin-script transliteration \
+if that's how they wrote it); default to English otherwise. Breed-aware detail: actively factor in this \
+pet's breed/age/weight from Pets On File when it's relevant (breed-specific risks, life-stage norms, \
+weight-based dosing context) rather than giving generic species-level advice."""
 
 FREE_TIER_PERSONALIZATION_RULE = """This customer is on the Free tier: reply in English only — if they \
 write in Hindi or another regional language, answer in English and mention that regional-language support \

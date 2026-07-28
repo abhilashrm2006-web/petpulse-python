@@ -15,19 +15,38 @@ from app.integrations.openai_client import json_completion
 
 logger = logging.getLogger(__name__)
 
-# The 10 major Indian regional languages this feature supports, beyond the
-# Hindi-only text personalization that existed before it (see
-# app/agent/system_prompt.py SUBSCRIBER_PERSONALIZATION_RULE).
+# All 22 languages listed in the Indian Constitution's Eighth Schedule, beyond
+# the Hindi-only text personalization that existed before this feature (see
+# app/agent/system_prompt.py SUBSCRIBER_PERSONALIZATION_RULE, which builds its
+# language list from this dict rather than hardcoding one, so the two can't
+# drift out of sync). Live-verified (real API call, not assumed) that
+# gpt-5.4/gpt-4o-mini-tts produce real native-script text and non-trivial
+# audio for every one of these, including the lower-resource ones (Bodo,
+# Dogri, Kashmiri, Konkani, Maithili, Manipuri, Santali, Sindhi) -- quality
+# for those rarer scripts is inherently bounded by how much of each the
+# underlying model was trained on, not something further prompting fixes.
 SUPPORTED_LANGUAGES: dict[str, str] = {
+    "as": "Assamese",
+    "bn": "Bengali",
+    "brx": "Bodo",
+    "doi": "Dogri",
+    "gu": "Gujarati",
     "hi": "Hindi",
+    "kn": "Kannada",
+    "ks": "Kashmiri",
+    "kok": "Konkani",
+    "mai": "Maithili",
+    "ml": "Malayalam",
+    "mni": "Manipuri",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "or": "Odia",
+    "pa": "Punjabi",
+    "sa": "Sanskrit",
+    "sat": "Santali",
+    "sd": "Sindhi",
     "ta": "Tamil",
     "te": "Telugu",
-    "kn": "Kannada",
-    "ml": "Malayalam",
-    "bn": "Bengali",
-    "mr": "Marathi",
-    "gu": "Gujarati",
-    "pa": "Punjabi",
     "ur": "Urdu",
 }
 
