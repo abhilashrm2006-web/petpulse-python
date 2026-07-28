@@ -37,9 +37,14 @@ VOICE_REPLIES_BUCKET = "voice-replies"
 # "prescription_delivered" is that same class again: deliver_prescription
 # already sends the text/PDF directly, so without suppression the customer
 # gets the prescription itself plus a redundant "here it is!" bubble on top.
+# "declined" found via a repeated-message audit: decline_session unconditionally
+# messages BOTH the customer and the doctor directly (not just "the other
+# party" — whichever of the two is the current actor gets messaged by the tool
+# too), so without suppression that actor got the tool's own message plus a
+# redundant agent reply on top of it.
 SELF_MESSAGING_MODES = {
     "doctor_catalogue_sent", "new_parent_guide_sent", "slot_list_sent", "booked", "rescheduled", "payment_requested",
-    "prescription_delivered", "subscriber_consult_confirmed", "subscription_started",
+    "prescription_delivered", "subscriber_consult_confirmed", "subscription_started", "declined",
 }
 
 SUBSCRIBER_ONLY_MESSAGE = (

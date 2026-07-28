@@ -30,6 +30,25 @@ async def send_vaccination_reminders(ctx: AppContext) -> None:
     )
 
     for vax in due:
+        # Atomic claim BEFORE sending: this cron fires once per worker process
+        # (in-process APScheduler, see app/scheduler/runner.py) and, if this ever
+        # runs on more than one Railway replica, once per replica too -- without
+        # claiming first, every worker/replica would independently see the same
+        # "due" row and send the same customer the same reminder N times. The
+        # UPDATE's own WHERE clause makes Postgres the single arbiter: only the
+        # caller that finds a still-unclaimed row (reminder_sent still False)
+        # gets it, exactly like the payment-webhook idempotency fix.
+        claimed = (
+            client.table("vaccinations")
+            .update({"reminder_sent": True})
+            .eq("id", vax["id"])
+            .eq("reminder_sent", False)
+            .execute()
+            .data
+        )
+        if not claimed:
+            continue
+
         pet = vax.get("pets") or {}
         # pet_members has two FKs into profiles (profile_id and added_by) --
         # get_pet_member_contacts already disambiguates that embed correctly
@@ -59,19 +78,15 @@ async def send_vaccination_reminders(ctx: AppContext) -> None:
             except Exception:
                 logger.exception("Failed to send vaccination reminder to %s", phone)
 
-        # Only mark reminder_sent when at least one household member was actually
-        # notified -- previously this was set unconditionally, so a transient
-        # WhatsApp outage (or every member's 24h messaging window being closed) at
-        # the moment the cron fires silently and permanently excluded that
-        # vaccination from every future run (`.neq("reminder_sent", True)` above),
-        # with no retry and no visible failure. Leaving it False lets tomorrow's
-        # run retry. If there were no members with contact info at all (no phone
-        # to try), there's nothing to retry into, so still mark it sent rather
-        # than loop on that forever.
         if any_sent or not members:
-            client.table("vaccinations").update(
-                {"reminder_sent": True, "status": "overdue" if overdue else vax["status"]}
-            ).eq("id", vax["id"]).execute()
+            # Already claimed (reminder_sent=True) above -- just update status.
+            client.table("vaccinations").update({"status": "overdue" if overdue else vax["status"]}).eq("id", vax["id"]).execute()
+        else:
+            # A transient WhatsApp outage (or every member's 24h messaging window
+            # being closed) at the moment the cron fires must not silently and
+            # permanently exclude this vaccination from every future run -- undo
+            # the claim so tomorrow's run retries it instead of losing it forever.
+            client.table("vaccinations").update({"reminder_sent": False}).eq("id", vax["id"]).execute()
 
 
 async def retain_chat_history(ctx: AppContext, keep_per_session: int = 60) -> None:
@@ -113,6 +128,20 @@ async def send_new_parent_followups(ctx: AppContext) -> None:
     )
 
     for followup in due:
+        # Same atomic-claim reasoning as send_vaccination_reminders -- prevents
+        # the same followup being sent twice if this job ever runs on more than
+        # one worker/replica.
+        claimed = (
+            client.table("new_parent_followups")
+            .update({"status": "sending"})
+            .eq("id", followup["id"])
+            .eq("status", "pending")
+            .execute()
+            .data
+        )
+        if not claimed:
+            continue
+
         profile_rows = client.table("profiles").select("phone_number").eq("id", followup["profile_id"]).limit(1).execute().data
         phone = profile_rows[0]["phone_number"] if profile_rows else None
         if phone:
@@ -121,3 +150,7 @@ async def send_new_parent_followups(ctx: AppContext) -> None:
                 client.table("new_parent_followups").update({"status": "sent"}).eq("id", followup["id"]).execute()
             except Exception:
                 logger.exception("Failed to send new-parent followup to %s", phone)
+                # Revert the claim so this isn't silently lost forever -- next run retries it.
+                client.table("new_parent_followups").update({"status": "pending"}).eq("id", followup["id"]).execute()
+        else:
+            client.table("new_parent_followups").update({"status": "pending"}).eq("id", followup["id"]).execute()

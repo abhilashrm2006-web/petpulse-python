@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.scheduler.jobs import send_vaccination_reminders
+from app.scheduler.jobs import send_new_parent_followups, send_vaccination_reminders
 from tests.fake_supabase import FakeSupabaseClient
 
 
@@ -144,3 +144,72 @@ async def test_reminder_marked_sent_when_at_least_one_send_succeeds():
     await send_vaccination_reminders(ctx)
 
     assert supabase.rows("vaccinations")[0]["reminder_sent"] is True
+
+
+@pytest.mark.asyncio
+async def test_running_the_job_twice_never_double_sends_the_same_reminder():
+    """The scheduler is in-process (app/scheduler/runner.py) and would run
+    once per worker process if this service is ever deployed with more than
+    one (see Dockerfile's --workers), plus once per replica if ever scaled
+    horizontally -- without an atomic claim, two runs racing on the same
+    "due" row would both send the customer the same reminder. This proves
+    the end-to-end effect: running the job twice back-to-back for the same
+    row sends it only once, because the first run's claim (an atomic
+    conditional UPDATE, not a plain read-then-write) makes the row no longer
+    "due" for the second run."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "vaccinations": [
+                {
+                    "id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies",
+                    "next_due_date": "2026-08-01", "status": "scheduled", "reminder_sent": False,
+                }
+            ],
+            "pets": [{"id": "pet-1", "name": "Rex"}],
+            "pet_members": [{"pet_id": "pet-1", "profile_id": "profile-1", "role": "owner"}],
+            "profiles": [{"id": "profile-1", "phone_number": "919000000001", "full_name": "Owner"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    await send_vaccination_reminders(ctx)
+    await send_vaccination_reminders(ctx)
+
+    assert ctx.whatsapp.send_text.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_new_parent_followup_running_twice_never_double_sends():
+    supabase = FakeSupabaseClient(
+        initial={
+            "new_parent_followups": [
+                {"id": "f1", "profile_id": "profile-1", "status": "pending", "due_at": "2020-01-01T00:00:00", "message_text": "Welcome!"}
+            ],
+            "profiles": [{"id": "profile-1", "phone_number": "919000000001"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    await send_new_parent_followups(ctx)
+    await send_new_parent_followups(ctx)
+
+    assert ctx.whatsapp.send_text.await_count == 1
+    assert supabase.rows("new_parent_followups")[0]["status"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_new_parent_followup_claim_is_reverted_on_send_failure():
+    supabase = FakeSupabaseClient(
+        initial={
+            "new_parent_followups": [
+                {"id": "f1", "profile_id": "profile-1", "status": "pending", "due_at": "2020-01-01T00:00:00", "message_text": "Welcome!"}
+            ],
+            "profiles": [{"id": "profile-1", "phone_number": "919000000001"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    ctx.whatsapp.send_text = AsyncMock(side_effect=RuntimeError("WhatsApp outage"))
+
+    await send_new_parent_followups(ctx)
+
+    assert supabase.rows("new_parent_followups")[0]["status"] == "pending"

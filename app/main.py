@@ -3,6 +3,7 @@ Webhook` verify-challenge node (spec §2). One route receives every inbound
 WhatsApp event (customer or vet); everything else is delegated to
 ingestion/agent modules."""
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -103,6 +104,48 @@ def _valid_signature(settings, body: bytes, signature_header: str | None) -> boo
     return hmac.compare_digest(expected, signature_header.removeprefix("sha256="))
 
 
+# Holds references to in-flight background message-processing tasks -- asyncio
+# only weakly tracks a bare `create_task()` result, so without keeping our own
+# reference the task object (and the coroutine running inside it) can be
+# garbage-collected mid-flight under load, silently killing that customer's
+# reply. Each task removes itself via a done-callback once finished.
+_background_tasks: set = set()
+
+
+async def _process_inbound_message(ctx: AppContext, extracted) -> None:
+    """The actual (potentially slow -- multiple OpenAI round-trips, several
+    Supabase reads/writes) work for one inbound message, run as a background
+    task so the webhook route itself can ack Meta immediately (see
+    receive_webhook). WhatsApp Cloud API retries a webhook delivery it
+    doesn't get a fast response to, re-sending the identical payload — our
+    dedup claim() already makes a retry harmless (it's a no-op), but avoiding
+    the retry in the first place avoids extra load and the messaging-quality
+    hit repeated retries can cause on Meta's side. Any exception here is the
+    same as before: logged, never allowed to propagate anywhere (there's
+    nothing left downstream to catch it — the HTTP response is long gone)."""
+    try:
+        if await handle_registration(ctx, extracted):
+            return  # brand-new/mid-registration number — wizard handled it, no agent turn
+
+        agent_ctx = await build_context(ctx.supabase, extracted)
+
+        media_context = ""
+        document_filing_status = ""
+        if any([extracted.image_media_id, extracted.audio_media_id, extracted.document_media_id, extracted.video_media_id]):
+            media_result = await process_media(ctx, extracted, agent_ctx.pets, agent_ctx.active_pet)
+            agent_ctx.pending_media = media_result
+            media_context = media_result.media_context
+            if media_result.document_classification:
+                document_filing_status = (
+                    f"attempted; detected_type={media_result.document_classification.document_type}, "
+                    f"is_medical={media_result.document_classification.is_medical_document}"
+                )
+
+        await run_agent_turn(ctx, agent_ctx, extracted, media_context, document_filing_status)
+    except Exception:
+        logger.exception("Failed to process inbound message %s", extracted.message_id)
+
+
 @app.post("/webhook/petpulse-core")
 async def receive_webhook(request: Request) -> Response:
     ctx: AppContext = request.app.state.ctx
@@ -125,27 +168,11 @@ async def receive_webhook(request: Request) -> Response:
     if not claim(ctx.supabase, extracted.message_id):
         return Response(status_code=200)  # duplicate delivery, already processed
 
-    try:
-        if await handle_registration(ctx, extracted):
-            return Response(status_code=200)  # brand-new/mid-registration number — wizard handled it, no agent turn
-
-        agent_ctx = await build_context(ctx.supabase, extracted)
-
-        media_context = ""
-        document_filing_status = ""
-        if any([extracted.image_media_id, extracted.audio_media_id, extracted.document_media_id, extracted.video_media_id]):
-            media_result = await process_media(ctx, extracted, agent_ctx.pets, agent_ctx.active_pet)
-            agent_ctx.pending_media = media_result
-            media_context = media_result.media_context
-            if media_result.document_classification:
-                document_filing_status = (
-                    f"attempted; detected_type={media_result.document_classification.document_type}, "
-                    f"is_medical={media_result.document_classification.is_medical_document}"
-                )
-
-        await run_agent_turn(ctx, agent_ctx, extracted, media_context, document_filing_status)
-    except Exception:
-        logger.exception("Failed to process inbound message %s", extracted.message_id)
+    # Ack Meta immediately, do the actual (slow) work after -- see
+    # _process_inbound_message's docstring for why.
+    task = asyncio.create_task(_process_inbound_message(ctx, extracted))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     return Response(status_code=200)
 

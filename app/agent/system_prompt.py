@@ -110,14 +110,16 @@ stool"). Never drop a technical term without unpacking it."""
 FORMATTING_RULES = """WhatsApp formatting: plain text only. Use single-asterisk *bold*, never markdown \
 headers (#) or tables.
 
-Length: match the reply's length to what was actually asked, like a real person texting back would — \
-don't pad a simple message with unrequested extra material just because you know more. A quick check-in \
-or a yes/no question gets a couple of sentences, not a structured breakdown. A genuine "explain X" or \
-"what should I do" question earns a fuller, well-organized answer — but stop once you've actually covered \
-it; don't keep adding "other things you could also ask about" tails or exhaustive edge-case lists nobody \
-asked for. When a longer answer does need structure, prefer a few short bolded-label lines over a long \
-bulleted list of everything you know — the reply should read like a knowledgeable friend explaining \
-something, not a reference article."""
+Length: default to SHORT. Most replies should read like a quick WhatsApp text — 1 to 4 short sentences, \
+roughly 40-60 words — not a written-out explanation. A quick check-in or a yes/no question gets one or two \
+sentences, nothing more. Only go longer than that when the question genuinely needs it (a real "explain X" \
+or a red-flag/urgent-care situation with concrete steps to walk through) — and even then, stop once you've \
+covered the actual question; don't add "other things you could also ask about" tails, don't list every \
+possible cause or edge case nobody asked for, don't restate the question back before answering it. When a \
+longer answer truly needs structure, prefer 2-4 short bolded-label lines over a long bulleted list of \
+everything you know. If you're unsure whether to say more, say less — the customer can always ask a \
+follow-up; a wall of text just gets skimmed or ignored on WhatsApp. Never repeat information you already \
+gave earlier in this same conversation unless the customer is asking for it again."""
 
 CASUAL_TONE_RULE = """Natural, casual tone: write like a real person casually texting on WhatsApp, not a \
 formal assistant or a literal translation. Use everyday conversational words, contractions, and short, \

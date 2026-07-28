@@ -100,9 +100,11 @@ def test_safety_rules_forbid_a_severity_line_without_an_actual_tool_call():
 def test_formatting_rules_calibrate_length_to_the_question():
     """Found via the same audit: replies weren't calibrated to what was
     actually asked -- a simple check-in got an over-elaborate structured
-    breakdown. FORMATTING_RULES now says explicitly to match length to the
-    question instead of just "be concise", which was too vague to act on."""
-    assert "match the reply's length" in FORMATTING_RULES
+    breakdown. FORMATTING_RULES now defaults explicitly to short with a
+    concrete word-count anchor, instead of just "be concise", which was too
+    vague to act on and still produced text-heavy replies per user feedback."""
+    assert "default to SHORT" in FORMATTING_RULES
+    assert "40-60 words" in FORMATTING_RULES
 
 
 def test_voice_reply_language_rule_asks_for_natural_spoken_style():

@@ -22,4 +22,19 @@ EXPOSE 8000
 # without also updating Railway's Settings > Networking target port to match,
 # or the proxy and the app end up listening on two different ports (silent
 # "connection refused" even though the container is healthy).
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+#
+# --workers 4: a single worker (the previous default) means one process, one
+# asyncio event loop -- and most of this app's Supabase calls are synchronous
+# (blocking) network calls, not wrapped in a thread, so one customer's turn
+# doing a dozen-plus DB round-trips blocks EVERY other concurrent customer's
+# message on that same event loop for the duration. That's a real bottleneck
+# found while investigating reports of delayed replies, and would only get
+# worse at higher volume. Each worker is a separate process (its own event
+# loop, its own AppContext/scheduler from the FastAPI lifespan), so this is
+# real OS-level parallelism, not just concurrency within one loop. 4 is a
+# starting point, not a measured optimum -- tune it against Railway's actual
+# CPU/memory allocation for this service once real traffic data exists.
+# Requires the scheduler jobs (app/scheduler/jobs.py) to be idempotent under
+# multiple workers, which they now are (atomic per-row claim before sending) --
+# don't raise this without confirming that's still true.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
