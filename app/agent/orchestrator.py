@@ -12,6 +12,7 @@ from typing import Any
 from app.agent import memory
 from app.agent.language import SUPPORTED_LANGUAGES, detect_regional_language
 from app.agent.registry import get_tool_fn, get_tool_schemas, is_tool_allowed_for_role, is_tool_allowed_for_tier
+from app.agent.tools.greeting import is_bare_greeting, send_welcome_character
 from app.agent.system_prompt import build_system_prompt, build_turn_context
 from app.deps import AppContext
 from app.ingestion.context import AgentContext, mark_onboarding_complete_if_needed
@@ -72,6 +73,17 @@ async def run_agent_turn(
     client = ctx.supabase
     phone = agent_ctx.profile["phone_number"]
     role = agent_ctx.role
+
+    # Deterministic, not an LLM tool call -- a model tool-call-based version of this
+    # didn't reliably fire turn to turn (confirmed live). Runs before the model ever
+    # sees the turn, so the mascot image always goes out for a real bare greeting
+    # regardless of what the model does; it still writes its own warm text
+    # separately (see GREETING_RULE), so this never duplicates that content.
+    if role != "vet" and extracted.message_type == "text" and is_bare_greeting(extracted.text):
+        try:
+            await send_welcome_character(ctx, agent_ctx)
+        except Exception:
+            logger.exception("Failed to send welcome character image for phone=%s", phone)
 
     # A voice-note reply is only attempted for a Subscriber's own voice note, and
     # only while the feature is enabled (settings.voice_replies_enabled, an ops-level

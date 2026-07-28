@@ -68,8 +68,12 @@ def test_casual_tone_rule_applies_to_customers_not_vets():
     assert CASUAL_TONE_RULE not in build_system_prompt("vet")
 
 
-def test_greeting_rule_instructs_sending_the_welcome_character():
-    assert "send_welcome_character()" in GREETING_RULE
+def test_greeting_rule_acknowledges_the_already_sent_welcome_image():
+    """The mascot image is now sent deterministically in code (see
+    app/agent/orchestrator.py), not via an LLM tool call -- the prompt just
+    needs to know it's already been sent, not to send it itself."""
+    assert "already been sent" in GREETING_RULE
+    assert "Pulsy" in GREETING_RULE
 
 
 def test_voice_reply_language_rule_asks_for_natural_spoken_style():

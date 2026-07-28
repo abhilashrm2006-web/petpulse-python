@@ -329,7 +329,8 @@ async def test_free_customer_gets_no_persistent_memory(monkeypatch):
 
     settings = Settings(openai_agent_max_iterations=10)
     ctx = AppContext(
-        settings=settings, http=None, whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_image=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
     agent_ctx = _make_agent_ctx(is_subscriber=False)
@@ -343,6 +344,7 @@ async def test_free_customer_gets_no_persistent_memory(monkeypatch):
     assert load_calls == []
     assert append_calls == []
     extract_mock.assert_not_awaited()
+    ctx.whatsapp.send_image.assert_awaited_once_with("919876543210", settings.pulsy_welcome_image_url)
 
 
 @pytest.mark.asyncio
@@ -611,3 +613,102 @@ async def test_voice_reply_failure_does_not_break_the_turn(monkeypatch):
     assert result == "Sure thing."
     ctx.whatsapp.send_reply_and_chunk.assert_awaited_once()
     ctx.whatsapp.send_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_welcome_image_not_sent_for_non_greeting_message(monkeypatch):
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    responses = [_fake_response("Sorry to hear that — tell me more.", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_image=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=False)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.greet2",
+        timestamp="1700000016", message_type="text", text="hi, my dog is limping",
+    )
+
+    await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    ctx.whatsapp.send_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_welcome_image_not_sent_for_vet_greeting(monkeypatch):
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    responses = [_fake_response("Hey doc, what can I help with?", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_image=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(role="vet")
+    extracted = ExtractedMessage(
+        phone_number="919000000001", sender_name="Dr. Rao", message_id="wamid.greet3",
+        timestamp="1700000017", message_type="text", text="hello",
+    )
+
+    await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    ctx.whatsapp.send_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_welcome_image_send_failure_does_not_break_the_turn(monkeypatch):
+    """A WhatsApp send failure for the image must never take down the rest
+    of the turn -- the customer still gets their text reply."""
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    responses = [_fake_response("Pulsy — Your Pet's Health Copilot, 24/7\nHey there!", None)]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings, http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_image=AsyncMock(side_effect=RuntimeError("boom"))),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(is_subscriber=False)
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.greet4",
+        timestamp="1700000018", message_type="text", text="hey",
+    )
+
+    result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    assert result == "Pulsy — Your Pet's Health Copilot, 24/7\nHey there!"
+    ctx.whatsapp.send_reply_and_chunk.assert_awaited_once()

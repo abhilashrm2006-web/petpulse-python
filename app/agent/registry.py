@@ -7,7 +7,7 @@ made by the same LLM loop."""
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from app.agent.tools import booking, documents, greeting, onboarding, pet_members, pet_parent_guide, subscriptions, symptoms, vets
+from app.agent.tools import booking, documents, onboarding, pet_members, pet_parent_guide, subscriptions, symptoms, vets
 
 
 @dataclass
@@ -50,16 +50,6 @@ _STR = {"type": "string"}
 _NUM_OR_NULL = {"type": ["number", "null"]}
 
 TOOL_SPECS: list[ToolSpec] = [
-    _spec(
-        "send_welcome_character",
-        "Sends Pulsy's mascot image (a friendly waving character, no caption) as a WhatsApp image message. "
-        "Call this once at the start of a bare greeting (see the greeting-branding rule) before writing your "
-        "own warm hello — never for a non-greeting message, and never more than once per conversation.",
-        {},
-        [],
-        greeting.send_welcome_character,
-        CUSTOMER,
-    ),
     _spec(
         "save_onboarding_field",
         "Save or update one piece of profile/pet information the customer just gave you (email, city, "
