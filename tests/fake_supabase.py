@@ -70,12 +70,46 @@ class _FakeQuery:
         self._filters.append((col, "ilike", pattern))
         return self
 
+    def is_(self, col, val):
+        # PostgREST's .is_() is for IS NULL / IS TRUE / IS FALSE checks; only
+        # the null case is used in this codebase so far.
+        self._filters.append((col, "is", None if val in (None, "null") else val))
+        return self
+
     def or_(self, expr):
         # expr like "full_name.ilike.%x%,phone_number.ilike.%x%" -- real
         # postgrest OR-filter syntax. Parsed into a list of (col, op, val)
         # tuples matched with OR semantics (any one matching is enough).
+        # Splits on commas OUTSIDE double quotes, and unescapes a quoted
+        # value ("\\"" -> "\"", "\\\\" -> "\\") -- mirrors real PostgREST's
+        # escaping so a value containing a literal comma/paren/quote (e.g.
+        # escape_or_filter_value-wrapped user search text) is treated as one
+        # literal clause instead of splitting into extra bogus clauses.
+        clauses = []
+        current = []
+        in_quotes = False
+        i = 0
+        while i < len(expr):
+            ch = expr[i]
+            if ch == "\\" and i + 1 < len(expr):
+                current.append(expr[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_quotes = not in_quotes
+                i += 1
+                continue
+            if ch == "," and not in_quotes:
+                clauses.append("".join(current))
+                current = []
+                i += 1
+                continue
+            current.append(ch)
+            i += 1
+        clauses.append("".join(current))
+
         conditions = []
-        for clause in expr.split(","):
+        for clause in clauses:
             col, op, val = clause.split(".", 2)
             conditions.append((col, op, val))
         self._filters.append((None, "or", conditions))
@@ -100,6 +134,8 @@ class _FakeQuery:
             if op == "lte" and (row_val is None or row_val > val):
                 return False
             if op == "in" and row_val not in val:
+                return False
+            if op == "is" and row_val != val:
                 return False
             if op == "ilike":
                 needle = val.strip("%").lower()

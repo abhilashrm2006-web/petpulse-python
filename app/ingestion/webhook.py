@@ -74,6 +74,21 @@ def extract_message(body: dict[str, Any]) -> ExtractedMessage | None:
         latitude = loc.get("latitude")
         longitude = loc.get("longitude")
         location_text = loc.get("name") or loc.get("address")
+    elif message_type == "reaction":
+        # No dedicated field on ExtractedMessage for this -- folded into text so
+        # the agent sees *something* instead of an entirely blank turn (previously
+        # every non-text/image/video/audio/document/location/interactive type,
+        # e.g. reaction/sticker/contacts/order/system, fell through with
+        # text="" and confused the agent into a generic non-answer).
+        emoji = message.get("reaction", {}).get("emoji", "")
+        text = f"[reacted {emoji}]".strip() if emoji else "[reacted to a message]"
+    elif message_type == "sticker":
+        text = "[sent a sticker]"
+    elif message_type == "contacts":
+        names = ", ".join(c.get("name", {}).get("formatted_name", "") for c in message.get("contacts", []) if c.get("name"))
+        text = f"[shared contact: {names}]" if names else "[shared a contact]"
+    elif message_type == "order":
+        text = "[sent an order]"
     elif message_type == "interactive":
         interactive = message.get("interactive", {})
         interactive_type = interactive.get("type")

@@ -46,6 +46,31 @@ async def test_list_customers_filters_by_role_and_search():
 
 
 @pytest.mark.asyncio
+async def test_list_customers_search_with_filter_syntax_characters_is_treated_as_literal_text():
+    """Real bug found via audit: `search` was spliced unescaped into a raw
+    PostgREST .or_() filter expression, so a value containing a comma or
+    parenthesis could inject additional filter clauses instead of being
+    treated as a literal search term. A search string built to look like
+    injected filter syntax must match nothing (no customer's name/phone/
+    email literally contains that text) rather than being parsed as extra
+    clauses that could widen the result set."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "Jane Doe", "phone_number": "919000000001", "email": "jane@x.com", "created_at": "2026-01-01"},
+                {"id": "c2", "role": "customer", "full_name": "Bob Smith", "phone_number": "919000000002", "email": "bob@x.com", "created_at": "2026-01-02"},
+            ]
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    injection_attempt = 'x),phone_number.ilike.*'
+    result = await admin_routes.list_customers(request, search=injection_attempt)
+
+    assert result["count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_list_customers_includes_each_customers_pets():
     supabase = FakeSupabaseClient(
         initial={

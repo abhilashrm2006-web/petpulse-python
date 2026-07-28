@@ -80,3 +80,67 @@ async def test_reminder_marked_sent_even_with_no_pet_members():
 
     ctx.whatsapp.send_text.assert_not_awaited()
     assert supabase.rows("vaccinations")[0]["reminder_sent"] is True
+
+
+@pytest.mark.asyncio
+async def test_reminder_not_marked_sent_when_every_send_fails():
+    """Real bug found via audit: reminder_sent was previously set
+    unconditionally after the send loop, so a transient WhatsApp outage (or
+    every member's 24h messaging window being closed) at the moment the cron
+    fires silently and permanently excluded that vaccination from every
+    future run (the query filters on `reminder_sent != True`), with no retry
+    and no visible failure."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "vaccinations": [
+                {
+                    "id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies",
+                    "next_due_date": "2026-08-01", "status": "scheduled", "reminder_sent": False,
+                }
+            ],
+            "pets": [{"id": "pet-1", "name": "Rex"}],
+            "pet_members": [{"pet_id": "pet-1", "profile_id": "profile-1", "role": "owner"}],
+            "profiles": [{"id": "profile-1", "phone_number": "919000000001", "full_name": "Owner"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    ctx.whatsapp.send_text = AsyncMock(side_effect=RuntimeError("WhatsApp outage"))
+
+    await send_vaccination_reminders(ctx)
+
+    ctx.whatsapp.send_text.assert_awaited_once()
+    assert supabase.rows("vaccinations")[0]["reminder_sent"] is False
+
+
+@pytest.mark.asyncio
+async def test_reminder_marked_sent_when_at_least_one_send_succeeds():
+    supabase = FakeSupabaseClient(
+        initial={
+            "vaccinations": [
+                {
+                    "id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies",
+                    "next_due_date": "2026-08-01", "status": "scheduled", "reminder_sent": False,
+                }
+            ],
+            "pets": [{"id": "pet-1", "name": "Rex"}],
+            "pet_members": [
+                {"pet_id": "pet-1", "profile_id": "profile-1", "role": "owner"},
+                {"pet_id": "pet-1", "profile_id": "profile-2", "role": "family"},
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919000000001", "full_name": "Owner"},
+                {"id": "profile-2", "phone_number": "919000000002", "full_name": "Family"},
+            ],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    async def flaky_send(phone, text):
+        if phone == "919000000001":
+            raise RuntimeError("expired 24h window")
+
+    ctx.whatsapp.send_text = AsyncMock(side_effect=flaky_send)
+
+    await send_vaccination_reminders(ctx)
+
+    assert supabase.rows("vaccinations")[0]["reminder_sent"] is True

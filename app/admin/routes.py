@@ -16,7 +16,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from app.agent.tools.booking import cancel_session
 from app.deps import AppContext
 from app.integrations import razorpay_client
-from app.integrations.supabase_client import sign_storage_url, upload_to_storage
+from app.integrations.supabase_client import escape_or_filter_value, sign_storage_url, upload_to_storage
 
 DOCTOR_DOCUMENTS_BUCKET = "doctor-documents"
 
@@ -110,7 +110,7 @@ async def list_customers(
     ctx = _ctx(request)
     query = ctx.supabase.table("profiles").select("*").eq("role", "customer")
     if search:
-        pattern = f"%{search}%"
+        pattern = escape_or_filter_value(f"%{search}%")
         query = query.or_(f"full_name.ilike.{pattern},phone_number.ilike.{pattern},email.ilike.{pattern}")
     if status:
         query = query.eq("is_active", status.lower() == "active")
@@ -268,7 +268,7 @@ async def list_doctors(
     ctx = _ctx(request)
     query = ctx.supabase.table("profiles").select("*").eq("role", "vet")
     if search:
-        pattern = f"%{search}%"
+        pattern = escape_or_filter_value(f"%{search}%")
         query = query.or_(f"full_name.ilike.{pattern},phone_number.ilike.{pattern},specialization.ilike.{pattern}")
     if area:
         query = query.ilike("area", f"%{area}%")

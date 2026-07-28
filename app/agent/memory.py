@@ -66,7 +66,13 @@ def append_turn(client: Client, phone_number: str, user_text: str, assistant_tex
 
 
 async def extract_and_update_memory(
-    openai_client: AsyncOpenAI, settings: Settings, client: Client, profile_id: str, user_text: str, assistant_text: str
+    openai_client: AsyncOpenAI,
+    settings: Settings,
+    client: Client,
+    profile_id: str,
+    user_text: str,
+    assistant_text: str,
+    pet_id: str | None = None,
 ) -> None:
     if not user_text:
         return
@@ -84,7 +90,16 @@ async def extract_and_update_memory(
     if not fields:
         return
 
-    existing = client.table("memory").select("*").eq("profile_id", profile_id).limit(1).execute().data
+    # Must be scoped by pet_id, not just profile_id -- a Subscriber account with
+    # multiple pets was previously reading/writing a single profile_id-only row
+    # regardless of which pet the turn was about, so the second pet discussed
+    # would silently overwrite the first pet's durable facts (pet_name, species,
+    # breed) with its own. app.ingestion.context._load_memory already expects
+    # per-pet rows (it unions a profile_id-only query with a pet_id query), this
+    # just makes the write side match that read-side contract.
+    query = client.table("memory").select("*").eq("profile_id", profile_id)
+    query = query.eq("pet_id", pet_id) if pet_id else query.is_("pet_id", "null")
+    existing = query.limit(1).execute().data
     if existing:
         merged = {**{k: existing[0].get(k) for k in fields}, **fields}
         client.table("memory").update(merged).eq("id", existing[0]["id"]).execute()
@@ -92,6 +107,7 @@ async def extract_and_update_memory(
         client.table("memory").insert(
             {
                 "profile_id": profile_id,
+                "pet_id": pet_id,
                 "memory_type": "Fact",
                 "title": "Profile fact",
                 "memory_text": json.dumps(fields),

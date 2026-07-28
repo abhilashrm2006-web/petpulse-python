@@ -122,6 +122,30 @@ def _doctor_hours(client, doctor_phone: str) -> tuple[int, int] | None:
     return _time_to_half_hour(rows[0]["opening_time"]), _time_to_half_hour(rows[0]["closing_time"])
 
 
+async def is_window_free(settings: Settings, start: datetime, end: datetime) -> bool:
+    """Last-moment recheck of the shared calendar's busy status for exactly
+    this [start, end) window -- used immediately before actually creating a
+    booking event. The slot list a customer picked from (compute_doctor_slots)
+    can be stale by the time booking actually finalizes: real time passes
+    between showing that list and the moment of finalizing (waiting on a
+    Razorpay payment, a recording-consent reply, a doctor's accept), and
+    nothing re-verified freshness at the actual moment of creating the
+    calendar event -- so two different sessions picking the same open slot
+    could both finalize and double-book. This doesn't need to be doctor-scoped
+    the same way compute_doctor_slots is, since every booking (any doctor)
+    shares the one "primary" calendar as the source of truth for what's busy."""
+    busy_raw = await google_calendar.list_busy_events(settings, start, end)
+    for event in busy_raw:
+        start_raw = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
+        end_raw = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
+        if not start_raw or not end_raw:
+            continue
+        busy_start, busy_end = _parse_calendar_boundary(start_raw), _parse_calendar_boundary(end_raw)
+        if _overlaps(start, end, busy_start, busy_end):
+            return False
+    return True
+
+
 async def compute_doctor_slots(
     settings: Settings, now: datetime | None = None, client=None, doctor_phone: str | None = None
 ) -> list[Slot]:

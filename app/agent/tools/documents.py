@@ -281,7 +281,12 @@ async def file_document(
     bucket = classification.bucket if classification else "medical-documents"
     ext = (media.document_mime_type or "").split("/")[-1] or "bin"
     timestamp = int(date.today().strftime("%Y%m%d"))
-    object_path = f"{target_pet['id']}/{timestamp}-{LABEL_TO_KEY.get(resolved_type, 'other')}.{ext}"
+    # A day-granularity timestamp alone collides whenever two documents of the same
+    # detected type are filed for the same pet on the same day (e.g. two "Lab
+    # Report" photos) -- upload_to_storage uses upsert, so a collision silently
+    # overwrites the earlier file's bytes while its `documents` row still points at
+    # that same storage_path, quietly serving the wrong file on any later fetch.
+    object_path = f"{target_pet['id']}/{timestamp}-{secrets.token_hex(4)}-{LABEL_TO_KEY.get(resolved_type, 'other')}.{ext}"
     storage_path = f"{bucket}/{object_path}"
 
     upload_to_storage(ctx.supabase, bucket, object_path, media.document_bytes, media.document_mime_type or "application/octet-stream")

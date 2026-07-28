@@ -46,6 +46,7 @@ async def send_vaccination_reminders(ctx: AppContext) -> None:
         detail_parts = [p for p in (vax.get("manufacturer"), f"Batch/Lot: {vax['batch_number']}" if vax.get("batch_number") else None) if p]
         full_text = basic_text + (f" ({' | '.join(detail_parts)})" if detail_parts else "")
 
+        any_sent = False
         for member in members:
             phone = member.get("phone_number")
             profile_id = member.get("profile_id")
@@ -54,12 +55,23 @@ async def send_vaccination_reminders(ctx: AppContext) -> None:
             text = full_text if is_active_subscriber(client, profile_id) else basic_text
             try:
                 await ctx.whatsapp.send_text(phone, text)
+                any_sent = True
             except Exception:
                 logger.exception("Failed to send vaccination reminder to %s", phone)
 
-        client.table("vaccinations").update(
-            {"reminder_sent": True, "status": "overdue" if overdue else vax["status"]}
-        ).eq("id", vax["id"]).execute()
+        # Only mark reminder_sent when at least one household member was actually
+        # notified -- previously this was set unconditionally, so a transient
+        # WhatsApp outage (or every member's 24h messaging window being closed) at
+        # the moment the cron fires silently and permanently excluded that
+        # vaccination from every future run (`.neq("reminder_sent", True)` above),
+        # with no retry and no visible failure. Leaving it False lets tomorrow's
+        # run retry. If there were no members with contact info at all (no phone
+        # to try), there's nothing to retry into, so still mark it sent rather
+        # than loop on that forever.
+        if any_sent or not members:
+            client.table("vaccinations").update(
+                {"reminder_sent": True, "status": "overdue" if overdue else vax["status"]}
+            ).eq("id", vax["id"]).execute()
 
 
 async def retain_chat_history(ctx: AppContext, keep_per_session: int = 60) -> None:

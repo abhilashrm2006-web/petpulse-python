@@ -192,7 +192,9 @@ async def run_agent_turn(
             logger.exception("Failed to append chat history for phone=%s", phone)
 
         try:
-            await memory.extract_and_update_memory(ctx.openai, ctx.settings, client, agent_ctx.profile["id"], extracted.text, final_text)
+            await memory.extract_and_update_memory(
+                ctx.openai, ctx.settings, client, agent_ctx.profile["id"], extracted.text, final_text, pet_id=memory_pet_id
+            )
         except Exception:
             logger.exception("Failed to update long-term memory for profile=%s", agent_ctx.profile["id"])
 

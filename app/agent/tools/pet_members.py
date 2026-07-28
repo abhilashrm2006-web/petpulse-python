@@ -41,13 +41,16 @@ async def add_pet_member(
     if invitee:
         invitee_profile = invitee[0]
     else:
-        # A brand-new phone number invited with role="vet" must actually become a
-        # vet in profiles.role, not just a pet_members row -- otherwise every
-        # vet-gated tool (accept_session, file_prescription, etc.) stays
-        # unavailable to them the first time they message the bot.
+        # Deliberately NEVER sets profiles.role="vet" here, even when role=="vet" --
+        # that pet_members.role is just a care-team label (e.g. "this is the pet's
+        # own regular vet contact"), not a grant of platform vet privileges. This
+        # tool is CUSTOMER-only (registry.py); if inviting someone here could flip
+        # their global profiles.role to "vet", any customer could hand an arbitrary
+        # phone number access to every vet-gated tool (accept_session,
+        # file_prescription, list_my_appointments, ...) for every session on the
+        # platform, not just this pet's. Real vets are onboarded only through the
+        # authenticated admin dashboard (app/admin/routes.py::onboard_doctor).
         new_profile = {"phone_number": normalized_phone, "full_name": member_name}
-        if role == "vet":
-            new_profile["role"] = "vet"
         created = client.table("profiles").insert(new_profile).execute()
         invitee_profile = created.data[0]
         is_new_user = True

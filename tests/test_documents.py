@@ -106,6 +106,39 @@ async def test_file_document_files_to_the_exact_pet_id_once_disambiguated(monkey
 
 
 @pytest.mark.asyncio
+async def test_two_documents_filed_same_day_get_distinct_storage_paths(monkeypatch):
+    """Real bug found via audit: object_path was built from only the pet_id
+    and a day-granularity timestamp, with no per-upload uniqueness. Since
+    upload_to_storage uses upsert, two documents of the same detected type
+    filed for the same pet on the same day (e.g. two "Lab Report" photos)
+    silently overwrote each other's bytes at the same storage path, while
+    each document's own `documents` row still pointed at that same path --
+    so an older row would later serve the newer file's content."""
+    from tests.fake_supabase import FakeSupabaseClient
+
+    supabase = FakeSupabaseClient()
+    agent_ctx = SimpleNamespace(
+        pets=[{"id": "pet-a", "name": "Max"}],
+        pending_media=SimpleNamespace(
+            document_bytes=b"fake-bytes", document_mime_type="image/jpeg", document_classification=None, media_context="lab report",
+        ),
+        profile={"id": "profile-1"},
+        is_subscriber=True,
+    )
+    ctx = SimpleNamespace(supabase=supabase, whatsapp=None, settings=None, openai=AsyncMock())
+
+    monkeypatch.setattr("app.agent.tools.documents.upload_to_storage", lambda *a, **k: None)
+    monkeypatch.setattr("app.agent.tools.documents.json_completion", AsyncMock(return_value='{"record_kind": "none"}'))
+
+    await file_document(ctx, agent_ctx, pet_id="pet-a", document_type="Lab Report")
+    await file_document(ctx, agent_ctx, pet_id="pet-a", document_type="Lab Report")
+
+    docs = supabase.rows("documents")
+    assert len(docs) == 2
+    assert docs[0]["storage_path"] != docs[1]["storage_path"]
+
+
+@pytest.mark.asyncio
 async def test_send_pet_document_surfaces_owner_disambiguation_instead_of_guessing():
     agent_ctx = SimpleNamespace(pets=_pets_with_a_name_collision_across_two_owners())
     ctx = SimpleNamespace(supabase=None, whatsapp=None, settings=None, openai=None)

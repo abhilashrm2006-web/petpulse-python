@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from app.availability.slots import IST, compute_doctor_slots
+from app.availability.slots import IST, compute_doctor_slots, is_window_free
 from app.deps import AppContext
 from app.ingestion.context import AgentContext
 from app.integrations import google_calendar, razorpay_client
@@ -354,7 +354,18 @@ def _subscriber_quota_used_this_month(client, profile_id: str) -> bool:
     booking.py never books more than one "subscription_covered" session per
     calendar month per profile, checked here rather than trusted from
     agent_ctx since a session could have been booked earlier in the same
-    turn's month."""
+    turn's month.
+
+    KNOWN LIMITATION: this is a plain read-then-write check, not an atomic
+    claim — two concurrent booking flows for the same subscriber (e.g. two
+    devices, or a retried WhatsApp webhook racing a slow one) can both read
+    "not used yet" before either session is written with
+    payment_status="subscription_covered", granting two free consults for
+    the month instead of one. Closing this fully needs a DB-level unique
+    constraint (e.g. a partial unique index or a dedicated monthly-claim
+    table with an atomic insert-or-conflict) rather than an application-level
+    check; that wasn't put in place here for lack of direct database schema
+    access at the time this was last touched."""
     month_start = datetime.now(tz=IST).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
     rows = (
         client.table("doctor_sessions")
@@ -480,13 +491,26 @@ async def handle_payment_webhook(ctx: AppContext, event_body: dict[str, Any]) ->
     if not session:
         logger.error("Razorpay webhook: paid session_id=%s has no matching doctor_sessions row", session_id)
         return False
-    if session.get("payment_status") == "paid":
+
+    # Read-then-write on payment_status was a TOCTOU race: Razorpay's at-least-once
+    # webhook delivery means two deliveries for the same payment_link.paid event can
+    # both read payment_status="awaiting" before either write lands, double-sending
+    # the recording-consent prompt (confirmed reachable — nothing here previously
+    # made the read+write atomic). Scoping the UPDATE's own WHERE clause to
+    # payment_status="awaiting" makes Postgres itself the single arbiter: only the
+    # delivery that finds a matching row does .execute() gets it, since Postgres
+    # runs UPDATE...WHERE as one atomic statement.
+    updated = (
+        client.table("doctor_sessions")
+        .update({"payment_status": "paid", "awaiting_from": "recording_consent", "recording_consent": "pending"})
+        .eq("id", session_id)
+        .eq("payment_status", "awaiting")
+        .execute()
+        .data
+    )
+    if not updated:
         logger.info("Razorpay webhook: session_id=%s already marked paid, ignoring duplicate delivery", session_id)
         return False
-
-    client.table("doctor_sessions").update(
-        {"payment_status": "paid", "awaiting_from": "recording_consent", "recording_consent": "pending"}
-    ).eq("id", session_id).execute()
 
     await _request_recording_consent(ctx, session)
     return True
@@ -556,6 +580,30 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
     # any calendar invite the parties already have keeps working.
     existing_event_id = session.get("calendar_event_id")
     is_reschedule = bool(existing_event_id)
+
+    if not is_reschedule:
+        # The slot list this was picked from can be stale by now -- real time
+        # passed waiting on payment/recording-consent/doctor-accept, with nothing
+        # re-verifying the window was still free at the actual moment of booking
+        # (confirmed: two different sessions picking the same open slot could both
+        # reach here and double-book the same doctor+time). A reschedule doesn't
+        # need this: it's moving a slot that's already this session's own event.
+        if not await is_window_free(ctx.settings, start, end):
+            client.table("doctor_sessions").update(
+                {"status": "negotiating", "awaiting_from": "customer_time_input", "preferred_time": None}
+            ).eq("id", session["id"]).execute()
+            if customer_profile:
+                await ctx.whatsapp.send_text(
+                    customer_profile["phone_number"],
+                    "Sorry, that slot was just taken by someone else. Let's find you another time.",
+                )
+            return {
+                "success": False,
+                "error": "slot_conflict",
+                "session_id": session["id"],
+                "message": "That slot was just taken by someone else — ask the customer to pick another time (call select_doctor for fresh availability).",
+            }
+
     event = None
     if existing_event_id:
         try:

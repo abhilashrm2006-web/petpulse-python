@@ -695,6 +695,7 @@ async def test_finalize_booking_passes_attendee_emails(monkeypatch):
     create_called = AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"})
     monkeypatch.setattr("app.agent.tools.booking.google_calendar.create_event_with_meet", create_called)
     monkeypatch.setattr("app.availability.slots.compute_doctor_slots", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.agent.tools.booking.is_window_free", AsyncMock(return_value=True))
 
     from app.agent.tools.booking import _finalize_booking
     from datetime import datetime as dt
@@ -709,6 +710,102 @@ async def test_finalize_booking_passes_attendee_emails(monkeypatch):
     create_called.assert_awaited_once()
     kwargs = create_called.call_args.kwargs
     assert set(kwargs["attendees"]) == {"jane@example.com", "dr.rao@example.com"}
+
+
+@pytest.mark.asyncio
+async def test_finalize_booking_refuses_to_double_book_a_slot_taken_since_it_was_picked(monkeypatch):
+    """Real race found via audit: the slot list a customer picked from can be
+    stale by the time booking actually finalizes (real time passes waiting
+    on payment/recording-consent/doctor-accept), and nothing previously
+    re-verified the window was still free at the actual moment of creating
+    the calendar event -- so two different sessions picking the same open
+    slot could both finalize and double-book the same doctor+time. This
+    confirms _finalize_booking now backs off instead of creating a
+    conflicting event when a last-moment recheck finds the window busy."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "pending_doctor_choice",
+                    "status": "pending",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    create_called = AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"})
+    monkeypatch.setattr("app.agent.tools.booking.google_calendar.create_event_with_meet", create_called)
+    monkeypatch.setattr("app.agent.tools.booking.is_window_free", AsyncMock(return_value=False))
+
+    from app.agent.tools.booking import _finalize_booking
+    from datetime import datetime as dt
+
+    session = supabase.rows("doctor_sessions")[0]
+    start = dt.fromisoformat("2026-07-28T14:00:00+05:30")
+    end = dt.fromisoformat("2026-07-28T14:30:00+05:30")
+
+    result = await _finalize_booking(ctx, session, "919000000001", start, end)
+
+    assert result["success"] is False
+    assert result["error"] == "slot_conflict"
+    create_called.assert_not_awaited()
+    session_row = supabase.rows("doctor_sessions")[0]
+    assert session_row["status"] == "negotiating"
+    assert session_row["awaiting_from"] == "customer_time_input"
+    ctx.whatsapp.send_text.assert_awaited_once()
+    assert ctx.whatsapp.send_text.call_args.args[0] == "919876543210"
+
+
+@pytest.mark.asyncio
+async def test_finalize_booking_reschedule_skips_the_conflict_recheck(monkeypatch):
+    """A reschedule is moving a slot that's already this session's own
+    event, not competing with anyone else for a new one -- it must not be
+    blocked by is_window_free (which would otherwise see the session's own
+    existing calendar event as a conflict)."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "accepted",
+                    "calendar_event_id": "existing-event-123",
+                    "meet_link": "https://meet.google.com/existing-link",
+                }
+            ],
+            "profiles": [{"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"}],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    update_called = AsyncMock(return_value={"success": True, "event_id": "existing-event-123", "meet_link": "https://meet.google.com/existing-link"})
+    monkeypatch.setattr("app.agent.tools.booking.google_calendar.update_event_time", update_called)
+    window_check = AsyncMock(return_value=False)
+    monkeypatch.setattr("app.agent.tools.booking.is_window_free", window_check)
+
+    from app.agent.tools.booking import _finalize_booking
+    from datetime import datetime as dt
+
+    session = supabase.rows("doctor_sessions")[0]
+    start = dt.fromisoformat("2026-07-29T15:00:00+05:30")
+    end = dt.fromisoformat("2026-07-29T15:30:00+05:30")
+
+    result = await _finalize_booking(ctx, session, "919000000001", start, end)
+
+    assert result["success"] is True
+    window_check.assert_not_awaited()
+    update_called.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -860,6 +957,49 @@ async def test_handle_payment_webhook_asks_for_recording_consent_instead_of_fina
 
 
 @pytest.mark.asyncio
+async def test_handle_payment_webhook_ignores_a_second_delivery_for_the_same_awaiting_session():
+    """Razorpay's documented at-least-once webhook delivery means the same
+    payment_link.paid event can arrive twice. A plain read-then-write on
+    payment_status was a TOCTOU race (both deliveries could read "awaiting"
+    before either wrote "paid"), double-sending the recording-consent
+    prompt. The fix scopes the UPDATE's own WHERE clause to
+    payment_status="awaiting" so only the delivery that actually flips the
+    row proceeds -- this exercises that by calling the handler twice against
+    the same starting state, mirroring two webhook deliveries."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "pending",
+                    "awaiting_from": "payment",
+                    "payment_status": "awaiting",
+                    "payment_link_id": "plink_123",
+                    "preferred_time": "2026-07-28T14:00:00+05:30",
+                }
+            ],
+            "profiles": [{"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"}],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    event_body = {
+        "event": "payment_link.paid",
+        "payload": {"payment_link": {"entity": {"id": "plink_123", "reference_id": "session-a"}}},
+    }
+
+    first = await handle_payment_webhook(ctx, event_body)
+    second = await handle_payment_webhook(ctx, event_body)
+
+    assert first is True
+    assert second is False
+    ctx.whatsapp.send_interactive_buttons.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("consent,expected", [(True, "given"), (False, "declined")])
 async def test_respond_to_recording_consent_finalizes_booking_either_way(monkeypatch, consent, expected):
     supabase = FakeSupabaseClient(
@@ -889,6 +1029,7 @@ async def test_respond_to_recording_consent_finalizes_booking_either_way(monkeyp
 
     create_called = AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"})
     monkeypatch.setattr("app.agent.tools.booking.google_calendar.create_event_with_meet", create_called)
+    monkeypatch.setattr("app.agent.tools.booking.is_window_free", AsyncMock(return_value=True))
 
     result = await respond_to_recording_consent(ctx, agent_ctx, session_id="session-a", consent=consent)
 
@@ -965,6 +1106,7 @@ async def test_finalize_booking_sends_a_detailed_assignment_notice_to_the_doctor
         "app.agent.tools.booking.google_calendar.create_event_with_meet",
         AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"}),
     )
+    monkeypatch.setattr("app.agent.tools.booking.is_window_free", AsyncMock(return_value=True))
 
     from app.agent.tools.booking import _finalize_booking
     from datetime import datetime as dt
@@ -1060,6 +1202,7 @@ async def test_finalize_booking_still_notifies_doctor_when_household_notificatio
         "app.agent.tools.booking.google_calendar.create_event_with_meet",
         AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"}),
     )
+    monkeypatch.setattr("app.agent.tools.booking.is_window_free", AsyncMock(return_value=True))
 
     from app.agent.tools.booking import _finalize_booking
     from datetime import datetime as dt

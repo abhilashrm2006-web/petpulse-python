@@ -122,6 +122,21 @@ def get_or_create_profile(client: Client, phone_number: str, sender_name: str) -
     return resp.data[0]
 
 
+def escape_or_filter_value(value: str) -> str:
+    """PostgREST's `.or_("col.op.value,col2.op.value2")` filter string treats
+    a bare comma or parenthesis in `value` as filter syntax (a new clause or
+    a group), not literal text -- an unescaped user-supplied value (e.g. an
+    admin search box, or free-text message content used as an ilike pattern)
+    can inject extra clauses into the query. Per PostgREST's documented
+    escaping, wrapping the value in double quotes makes it literal; inside
+    those quotes, a literal backslash or double quote must itself be
+    backslash-escaped."""
+    if any(c in value for c in ',()"\\'):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
 def is_unique_violation(exc: Exception) -> bool:
     """postgrest raises a generic APIError on any DB error — this is the
     only way to distinguish a real unique-constraint conflict (23505) from

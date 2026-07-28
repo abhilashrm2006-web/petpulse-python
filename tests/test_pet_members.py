@@ -24,7 +24,14 @@ def _make_agent_ctx(pets):
 
 
 @pytest.mark.asyncio
-async def test_add_pet_member_grants_vet_role_to_a_brand_new_invitee():
+async def test_add_pet_member_never_grants_platform_vet_role_to_a_brand_new_invitee():
+    """Security regression test: add_pet_member is a CUSTOMER-only tool
+    (registry.py) -- a customer inviting someone with pet_members.role="vet"
+    (a care-team label) must never escalate that invitee's global
+    profiles.role to "vet", since that would unlock every vet-gated tool
+    (accept_session, file_prescription, list_my_appointments, ...) for that
+    phone number platform-wide, not just for this pet. Real vets are only
+    ever onboarded via the authenticated admin dashboard."""
     supabase = FakeSupabaseClient(initial={"pets": [{"id": "pet-a", "name": "Max"}]})
     ctx = _make_ctx(supabase)
     agent_ctx = _make_agent_ctx(pets=[{"id": "pet-a", "name": "Max"}])
@@ -36,7 +43,9 @@ async def test_add_pet_member_grants_vet_role_to_a_brand_new_invitee():
     assert result["success"] is True
     assert result["invitee_is_new_user"] is True
     profile = next(p for p in supabase.rows("profiles") if p["phone_number"] == "919000000001")
-    assert profile["role"] == "vet"
+    assert profile.get("role") != "vet"
+    membership = next(m for m in supabase.rows("pet_members") if m["profile_id"] == profile["id"])
+    assert membership["role"] == "vet"
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ from typing import Any
 from supabase import Client
 
 from app.ingestion.webhook import ExtractedMessage
-from app.integrations.supabase_client import get_pets_for_profile, get_profile_by_phone, is_active_subscriber
+from app.integrations.supabase_client import escape_or_filter_value, get_pets_for_profile, get_profile_by_phone, is_active_subscriber
 from app.utils.pet_resolution import resolve_active_pet_from_message
 
 ONBOARDING_REQUIRED_FIELDS = ["email", "city", "pet_name", "breed", "age", "weight", "dob"]
@@ -86,13 +86,15 @@ def _load_medical_context(client: Client, profile_id: str) -> dict[str, Any]:
 def _load_knowledge_base(client: Client, message_text: str) -> list[dict[str, Any]]:
     if not message_text:
         return []
-    pattern = f"%{message_text[:60]}%"
+    # Chaining three .ilike() calls on one query builder ANDs them (separate
+    # PostgREST query params) -- a row would need the same substring in
+    # category AND content AND title at once, which essentially never
+    # happens. .or_() is what actually matches "any of these columns".
+    pattern = escape_or_filter_value(f"%{message_text[:60]}%")
     resp = (
         client.table("knowledge_base")
         .select("*")
-        .ilike("category", pattern)
-        .ilike("content", pattern)
-        .ilike("title", pattern)
+        .or_(f"category.ilike.{pattern},content.ilike.{pattern},title.ilike.{pattern}")
         .limit(5)
         .execute()
     )
