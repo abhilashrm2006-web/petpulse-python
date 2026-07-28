@@ -1,18 +1,25 @@
-"""Covers send_vaccination_reminders. Also the site of a real regression
-found via live testing: it used to build the pet-members-with-phone-number
-join as a raw `pet_members.select("profile_id, profiles(phone_number)")`
-call, which crashed on the real schema (PGRST201, "Could not embed because
-more than one relationship was found for 'pet_members' and 'profiles'")
-since pet_members has two FKs into profiles (profile_id and added_by).
-FakeSupabaseClient doesn't model that ambiguity, so this suite covers the
-tier-gating behavior; the join fix itself was confirmed against the real
-DB by reusing get_pet_member_contacts (already disambiguated there).
+"""Covers send_vaccination_reminders (both the T-3..T-0 daily countdown and
+the separate one-shot overdue ping) and send_new_parent_followups. Also the
+site of a real regression found via live testing: it used to build the
+pet-members-with-phone-number join as a raw
+`pet_members.select("profile_id, profiles(phone_number)")` call, which
+crashed on the real schema (PGRST201, "Could not embed because more than one
+relationship was found for 'pet_members' and 'profiles'") since pet_members
+has two FKs into profiles (profile_id and added_by). FakeSupabaseClient
+doesn't model that ambiguity, so this suite covers the tier-gating behavior;
+the join fix itself was confirmed against the real DB by reusing
+get_pet_member_contacts (already disambiguated there).
 
 Per the product spec, Free customers now DO get vaccination reminders --
 just the basic due-date ping, not the fuller Subscriber version (extra
 manufacturer/batch detail when on file). Reminders are a content upgrade
-by tier, not a send gate."""
+by tier, not a send gate.
 
+Dates are computed relative to date.today() throughout (not hardcoded) so
+these tests stay valid regardless of when they're run -- the T-3..T-0
+countdown window is itself relative to "today"."""
+
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -26,14 +33,18 @@ def _make_ctx(supabase):
     return SimpleNamespace(supabase=supabase, whatsapp=SimpleNamespace(send_text=AsyncMock()))
 
 
+def _due_in(days: int) -> str:
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
 @pytest.mark.asyncio
-async def test_free_and_subscriber_pet_members_both_get_a_reminder_different_detail():
+async def test_free_and_subscriber_pet_members_both_get_a_countdown_reminder_different_detail():
     supabase = FakeSupabaseClient(
         initial={
             "vaccinations": [
                 {
                     "id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies",
-                    "next_due_date": "2026-08-01", "status": "scheduled", "reminder_sent": False,
+                    "next_due_date": _due_in(3), "status": "scheduled",
                     "manufacturer": "Zoetis", "batch_number": "LOT-1",
                 }
             ],
@@ -57,17 +68,96 @@ async def test_free_and_subscriber_pet_members_both_get_a_reminder_different_det
     assert set(sent) == {"919000000001", "919000000002"}
     assert "Zoetis" not in sent["919000000001"]
     assert "Zoetis" in sent["919000000002"]
+    assert "3 days" in sent["919000000001"]
 
 
 @pytest.mark.asyncio
-async def test_reminder_marked_sent_even_with_no_pet_members():
+@pytest.mark.parametrize("offset,phrase", [(3, "3 days"), (2, "2 days"), (1, "tomorrow"), (0, "today")])
+async def test_countdown_sends_the_right_phrase_for_each_day_offset(offset, phrase):
     supabase = FakeSupabaseClient(
         initial={
             "vaccinations": [
-                {
-                    "id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies",
-                    "next_due_date": "2026-08-01", "status": "scheduled", "reminder_sent": False,
-                }
+                {"id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies", "next_due_date": _due_in(offset), "status": "scheduled"}
+            ],
+            "pets": [{"id": "pet-1", "name": "Rex"}],
+            "pet_members": [{"pet_id": "pet-1", "profile_id": "profile-1", "role": "owner"}],
+            "profiles": [{"id": "profile-1", "phone_number": "919000000001", "full_name": "Owner"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    await send_vaccination_reminders(ctx)
+
+    ctx.whatsapp.send_text.assert_awaited_once()
+    assert phrase in ctx.whatsapp.send_text.await_args.args[1]
+    assert supabase.rows("vaccinations")[0]["last_reminder_offset_sent"] == offset
+
+
+@pytest.mark.asyncio
+async def test_countdown_progresses_through_each_day_but_never_goes_backwards():
+    """The whole point of the countdown: a customer gets a ping on T-3, T-2,
+    T-1, AND T-0 -- four separate reminders leading up to the due date, not
+    just one. Simulates each day passing by re-pointing next_due_date closer
+    (equivalent to date.today() advancing by one from the row's perspective)
+    and confirms each new, smaller offset sends -- while a same-or-larger
+    offset (the row already has a smaller one on file) never re-sends,
+    which is what actually prevents same-day double-sends across workers."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "vaccinations": [
+                {"id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies", "next_due_date": _due_in(3), "status": "scheduled"}
+            ],
+            "pets": [{"id": "pet-1", "name": "Rex"}],
+            "pet_members": [{"pet_id": "pet-1", "profile_id": "profile-1", "role": "owner"}],
+            "profiles": [{"id": "profile-1", "phone_number": "919000000001", "full_name": "Owner"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    await send_vaccination_reminders(ctx)  # T-3
+    assert ctx.whatsapp.send_text.await_count == 1
+    assert supabase.rows("vaccinations")[0]["last_reminder_offset_sent"] == 3
+
+    await send_vaccination_reminders(ctx)  # same day again -- must not re-send
+    assert ctx.whatsapp.send_text.await_count == 1
+
+    supabase.rows("vaccinations")[0]["next_due_date"] = _due_in(2)  # a day passes
+    await send_vaccination_reminders(ctx)  # T-2
+    assert ctx.whatsapp.send_text.await_count == 2
+    assert supabase.rows("vaccinations")[0]["last_reminder_offset_sent"] == 2
+
+    supabase.rows("vaccinations")[0]["next_due_date"] = _due_in(0)  # two more days pass
+    await send_vaccination_reminders(ctx)  # T-0
+    assert ctx.whatsapp.send_text.await_count == 3
+    assert supabase.rows("vaccinations")[0]["last_reminder_offset_sent"] == 0
+
+
+@pytest.mark.asyncio
+async def test_countdown_claim_is_reverted_on_total_send_failure():
+    supabase = FakeSupabaseClient(
+        initial={
+            "vaccinations": [
+                {"id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies", "next_due_date": _due_in(2), "status": "scheduled"}
+            ],
+            "pets": [{"id": "pet-1", "name": "Rex"}],
+            "pet_members": [{"pet_id": "pet-1", "profile_id": "profile-1", "role": "owner"}],
+            "profiles": [{"id": "profile-1", "phone_number": "919000000001", "full_name": "Owner"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    ctx.whatsapp.send_text = AsyncMock(side_effect=RuntimeError("WhatsApp outage"))
+
+    await send_vaccination_reminders(ctx)
+
+    assert supabase.rows("vaccinations")[0]["last_reminder_offset_sent"] is None
+
+
+@pytest.mark.asyncio
+async def test_overdue_reminder_marked_sent_even_with_no_pet_members():
+    supabase = FakeSupabaseClient(
+        initial={
+            "vaccinations": [
+                {"id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies", "next_due_date": _due_in(-1), "status": "scheduled", "reminder_sent": False}
             ],
             "pets": [{"id": "pet-1", "name": "Rex"}],
             "pet_members": [],
@@ -83,20 +173,16 @@ async def test_reminder_marked_sent_even_with_no_pet_members():
 
 
 @pytest.mark.asyncio
-async def test_reminder_not_marked_sent_when_every_send_fails():
+async def test_overdue_reminder_not_marked_sent_when_every_send_fails():
     """Real bug found via audit: reminder_sent was previously set
     unconditionally after the send loop, so a transient WhatsApp outage (or
     every member's 24h messaging window being closed) at the moment the cron
     fires silently and permanently excluded that vaccination from every
-    future run (the query filters on `reminder_sent != True`), with no retry
-    and no visible failure."""
+    future run, with no retry and no visible failure."""
     supabase = FakeSupabaseClient(
         initial={
             "vaccinations": [
-                {
-                    "id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies",
-                    "next_due_date": "2026-08-01", "status": "scheduled", "reminder_sent": False,
-                }
+                {"id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies", "next_due_date": _due_in(-1), "status": "scheduled", "reminder_sent": False}
             ],
             "pets": [{"id": "pet-1", "name": "Rex"}],
             "pet_members": [{"pet_id": "pet-1", "profile_id": "profile-1", "role": "owner"}],
@@ -113,14 +199,11 @@ async def test_reminder_not_marked_sent_when_every_send_fails():
 
 
 @pytest.mark.asyncio
-async def test_reminder_marked_sent_when_at_least_one_send_succeeds():
+async def test_overdue_reminder_marked_sent_when_at_least_one_send_succeeds():
     supabase = FakeSupabaseClient(
         initial={
             "vaccinations": [
-                {
-                    "id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies",
-                    "next_due_date": "2026-08-01", "status": "scheduled", "reminder_sent": False,
-                }
+                {"id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies", "next_due_date": _due_in(-1), "status": "scheduled", "reminder_sent": False}
             ],
             "pets": [{"id": "pet-1", "name": "Rex"}],
             "pet_members": [
@@ -144,10 +227,11 @@ async def test_reminder_marked_sent_when_at_least_one_send_succeeds():
     await send_vaccination_reminders(ctx)
 
     assert supabase.rows("vaccinations")[0]["reminder_sent"] is True
+    assert supabase.rows("vaccinations")[0]["status"] == "overdue"
 
 
 @pytest.mark.asyncio
-async def test_running_the_job_twice_never_double_sends_the_same_reminder():
+async def test_overdue_reminder_running_twice_never_double_sends():
     """The scheduler is in-process (app/scheduler/runner.py) and would run
     once per worker process if this service is ever deployed with more than
     one (see Dockerfile's --workers), plus once per replica if ever scaled
@@ -160,10 +244,7 @@ async def test_running_the_job_twice_never_double_sends_the_same_reminder():
     supabase = FakeSupabaseClient(
         initial={
             "vaccinations": [
-                {
-                    "id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies",
-                    "next_due_date": "2026-08-01", "status": "scheduled", "reminder_sent": False,
-                }
+                {"id": "vax-1", "pet_id": "pet-1", "vaccine_name": "Rabies", "next_due_date": _due_in(-1), "status": "scheduled", "reminder_sent": False}
             ],
             "pets": [{"id": "pet-1", "name": "Rex"}],
             "pet_members": [{"pet_id": "pet-1", "profile_id": "profile-1", "role": "owner"}],

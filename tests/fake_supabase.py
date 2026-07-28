@@ -54,6 +54,14 @@ class _FakeQuery:
         self._filters.append((col, "neq", val))
         return self
 
+    def gt(self, col, val):
+        self._filters.append((col, "gt", val))
+        return self
+
+    def lt(self, col, val):
+        self._filters.append((col, "lt", val))
+        return self
+
     def gte(self, col, val):
         self._filters.append((col, "gte", val))
         return self
@@ -142,6 +150,10 @@ class _FakeQuery:
                 return False
             if op == "lte" and (row_val is None or row_val > val):
                 return False
+            if op == "gt" and (row_val is None or row_val <= val):
+                return False
+            if op == "lt" and (row_val is None or row_val >= val):
+                return False
             if op == "in" and row_val not in val:
                 return False
             if op == "is" and row_val != val:
@@ -156,12 +168,29 @@ class _FakeQuery:
         return True
 
     def _matches_one(self, row: dict[str, Any], col: str, op: str, val: str) -> bool:
-        row_val = row.get(col)
+        row_val = self._resolve_col(row, col)
         if op == "ilike":
             needle = val.strip("%").lower()
             return bool(row_val) and needle in str(row_val).lower()
         if op == "eq":
             return row_val == val
+        if op == "is":
+            return row_val is None if val in ("null", None) else row_val == val
+        if op in ("gt", "lt", "gte", "lte"):
+            if row_val is None:
+                return False
+            # PostgREST OR-clause values arrive as raw strings (e.g. "3" or an
+            # ISO timestamp) -- cast to match the row's own type so `3 > "2"`
+            # compares numerically, not lexicographically, while an ISO
+            # timestamp string still compares correctly as a string.
+            typed_val = type(row_val)(val) if isinstance(row_val, (int, float)) else val
+            if op == "gt":
+                return row_val > typed_val
+            if op == "lt":
+                return row_val < typed_val
+            if op == "gte":
+                return row_val >= typed_val
+            return row_val <= typed_val
         return False
 
     def execute(self):
@@ -192,21 +221,20 @@ class _FakeQuery:
             table[:] = remaining
             return _FakeResult(deleted)
 
-        # select
-        matched = [row for row in table if self._matches(row)]
+        # select -- always copies, never the live row references, so a caller
+        # holding onto a select() result can't be silently mutated by a later
+        # update() call on the same underlying row (real PostgREST/Supabase
+        # results are independent serialized data, not shared references).
+        matched = [dict(row) for row in table if self._matches(row)]
         if self._limit is not None:
             matched = matched[: self._limit]
 
         select_str = " ".join(str(a) for a in self._select_args)
         if "profiles" in select_str and self._table_name != "profiles":
             profiles_table = self._store.setdefault("profiles", [])
-            embedded = []
             for row in matched:
-                copy = dict(row)
                 match = next((p for p in profiles_table if p.get("id") == row.get("profile_id")), None)
-                copy["profiles"] = dict(match) if match else None
-                embedded.append(copy)
-            matched = embedded
+                row["profiles"] = dict(match) if match else None
 
         return _FakeResult(matched)
 
