@@ -60,16 +60,27 @@ class WhatsAppClient:
     async def send_text(self, to: str, body: str) -> dict:
         return await self._post({"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": body}})
 
-    async def send_reply_and_chunk(self, to: str, text: str) -> None:
+    async def send_reply_and_chunk(self, to: str, text: str) -> list[tuple[str, str]]:
         """Formats + chunks a long agent reply and sends each chunk with a
         throttling delay, matching `Format WhatsApp Response` -> `Split
-        Response Into Chunks` -> `Chunk Send Loop` (spec §2/§6)."""
+        Response Into Chunks` -> `Chunk Send Loop` (spec §2/§6).
+
+        Returns each chunk's (wamid, chunk_text) so the caller can persist
+        the mapping -- WhatsApp's "reply"/quote feature lets a customer tap
+        any one bubble and quote it later (`context.id` on their next
+        message), and without this the bot has no way to look up what text
+        was actually in the bubble being quoted."""
         formatted = to_whatsapp_markdown(text)
         chunks = split_into_chunks(formatted)
+        sent: list[tuple[str, str]] = []
         for i, chunk in enumerate(chunks):
-            await self.send_text(to, chunk)
+            result = await self.send_text(to, chunk)
+            messages = result.get("messages") or []
+            if messages and messages[0].get("id"):
+                sent.append((messages[0]["id"], chunk))
             if i < len(chunks) - 1:
                 await asyncio.sleep(CHUNK_DELAY_SECONDS)
+        return sent
 
     async def send_interactive_list(
         self,

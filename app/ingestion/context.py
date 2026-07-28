@@ -36,6 +36,7 @@ class AgentContext:
     pending_media: Any = None  # set post-construction to this turn's MediaResult (app.ingestion.media), if any
     awaiting_prescription_session: dict[str, Any] | None = None
     is_subscriber: bool = False
+    quoted_message_text: str | None = None
 
 
 async def _to_thread(fn, *args, **kwargs):
@@ -99,6 +100,27 @@ def _load_knowledge_base(client: Client, message_text: str) -> list[dict[str, An
         .execute()
     )
     return resp.data or []
+
+
+def _resolve_quoted_message(client: Client, quoted_wamid: str | None) -> str | None:
+    """Resolves WhatsApp's "reply"/quote feature (context.id on the inbound
+    message) back to the actual text of the bubble being quoted -- without
+    this, a customer tapping reply on an old message ("what about this?")
+    gives the agent nothing to ground the answer in beyond the vague new
+    text. `messages.metadata->>wamid` is written on every row we insert (see
+    app/agent/orchestrator.py); only found if that row still exists (not
+    older than whatever this table's retention is) and this codebase (not
+    some pre-migration message) sent/logged it."""
+    if not quoted_wamid:
+        return None
+    resp = (
+        client.table("messages")
+        .select("content")
+        .eq("metadata->>wamid", quoted_wamid)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0]["content"] if resp.data else None
 
 
 def _load_open_session(client: Client, profile_id: str) -> dict[str, Any] | None:
@@ -186,9 +208,10 @@ async def build_context(client: Client, extracted: ExtractedMessage) -> AgentCon
     active_pet, active_pet_matched = resolve_active_pet_from_message(pets, extracted.text)
 
     if role == "vet":
-        open_session, awaiting_prescription_session = await asyncio.gather(
+        open_session, awaiting_prescription_session, quoted_message_text = await asyncio.gather(
             _to_thread(_load_doctor_open_session, client, extracted.phone_number),
             _to_thread(_load_awaiting_prescription_session, client, extracted.phone_number),
+            _to_thread(_resolve_quoted_message, client, extracted.quoted_wamid),
         )
         pending_negotiation = None
         memory_context: list[dict[str, Any]] = []
@@ -196,12 +219,13 @@ async def build_context(client: Client, extracted: ExtractedMessage) -> AgentCon
         knowledge_base: list[dict[str, Any]] = []
     else:
         awaiting_prescription_session = None
-        memory_context, medical_context, knowledge_base, open_session, pending_negotiation = await asyncio.gather(
+        memory_context, medical_context, knowledge_base, open_session, pending_negotiation, quoted_message_text = await asyncio.gather(
             _to_thread(_load_memory, client, profile["id"], active_pet["id"] if active_pet else None),
             _to_thread(_load_medical_context, client, profile["id"]),
             _to_thread(_load_knowledge_base, client, extracted.text),
             _to_thread(_load_open_session, client, profile["id"]),
             _to_thread(_load_pending_negotiation, client, profile["id"]),
+            _to_thread(_resolve_quoted_message, client, extracted.quoted_wamid),
         )
 
     onboarding = compute_onboarding_status(profile, pets) if role != "vet" else {}
@@ -222,6 +246,7 @@ async def build_context(client: Client, extracted: ExtractedMessage) -> AgentCon
         onboarding=onboarding,
         awaiting_prescription_session=awaiting_prescription_session,
         is_subscriber=is_subscriber,
+        quoted_message_text=quoted_message_text,
     )
 
 

@@ -163,8 +163,9 @@ async def run_agent_turn(
     if self_messaged:
         final_text = ""
 
+    sent_chunks: list[tuple[str, str]] = []
     if final_text.strip():
-        await ctx.whatsapp.send_reply_and_chunk(phone, final_text)
+        sent_chunks = await ctx.whatsapp.send_reply_and_chunk(phone, final_text)
 
     # Best-effort voice reply on top of the text reply already sent above -- never
     # lets a TTS/storage/send failure affect the turn, since the customer already
@@ -210,25 +211,45 @@ async def run_agent_turn(
             }
         ).execute().data[0]
 
-        client.table("messages").insert(
+        # Each row's metadata.wamid is how a later "reply"/quote from the customer
+        # (WhatsApp's context.id on their next message) gets resolved back to actual
+        # text -- see app.ingestion.context._resolve_quoted_message. One row per
+        # WhatsApp bubble, not one combined row for the whole turn, since a customer
+        # can tap-reply to any single bubble of a multi-chunk answer specifically.
+        inbound_row = {
+            "conversation_id": conversation["id"],
+            "profile_id": agent_ctx.profile["id"],
+            "sender_type": "vet" if role == "vet" else "user",
+            "content": extracted.text,
+            "message_type": extracted.message_type if extracted.message_type in
+                ("text", "image", "audio", "video", "document", "location") else "text",
+            "metadata": {"wamid": extracted.message_id} if extracted.message_id else {},
+        }
+        outbound_rows = (
             [
                 {
                     "conversation_id": conversation["id"],
                     "profile_id": agent_ctx.profile["id"],
-                    "sender_type": "vet" if role == "vet" else "user",
-                    "content": extracted.text,
-                    "message_type": extracted.message_type if extracted.message_type in
-                        ("text", "image", "audio", "video", "document", "location") else "text",
-                },
+                    "sender_type": "assistant",
+                    "content": chunk_text,
+                    "message_type": "text",
+                    "metadata": {"wamid": wamid},
+                }
+                for wamid, chunk_text in sent_chunks
+            ]
+            if sent_chunks
+            else [
                 {
                     "conversation_id": conversation["id"],
                     "profile_id": agent_ctx.profile["id"],
                     "sender_type": "assistant",
                     "content": final_text,
                     "message_type": "text",
-                },
+                    "metadata": {},
+                }
             ]
-        ).execute()
+        )
+        client.table("messages").insert([inbound_row, *outbound_rows]).execute()
     except Exception:
         logger.exception("Failed to log conversation/messages for profile=%s", agent_ctx.profile["id"])
 

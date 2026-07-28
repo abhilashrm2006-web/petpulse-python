@@ -120,6 +120,30 @@ async def test_send_video_posts_link_based_video_message():
 
 
 @pytest.mark.asyncio
+async def test_send_reply_and_chunk_returns_wamid_and_text_per_chunk():
+    """Needed to resolve WhatsApp's "reply"/quote feature later -- a
+    customer can tap reply on any one bubble of a multi-chunk answer, and
+    the bot needs to know which wamid maps to which chunk's actual text
+    (see app.ingestion.context._resolve_quoted_message)."""
+    fake = _FakeHttpClient(
+        [
+            _ok_response({"messages": [{"id": "wamid.chunk1"}]}),
+            _ok_response({"messages": [{"id": "wamid.chunk2"}]}),
+        ]
+    )
+    client = WhatsAppClient(Settings(), fake)
+    two_paragraph_text = "First paragraph, short.\n\nSecond paragraph, also short."
+
+    result = await client.send_reply_and_chunk("919000000001", two_paragraph_text)
+
+    assert len(result) == 2
+    assert result[0][0] == "wamid.chunk1"
+    assert result[1][0] == "wamid.chunk2"
+    assert result[0][1] and result[1][1]
+    assert result[0][1] != result[1][1]
+
+
+@pytest.mark.asyncio
 async def test_send_sticker_posts_link_based_sticker_message():
     fake = _FakeHttpClient([_ok_response({"messages": [{"id": "wamid.sticker1"}]})])
     client = WhatsAppClient(Settings(), fake)

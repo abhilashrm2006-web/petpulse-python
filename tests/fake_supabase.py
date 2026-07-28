@@ -122,9 +122,18 @@ class _FakeQuery:
         self._limit = n
         return self
 
+    @staticmethod
+    def _resolve_col(row: dict[str, Any], col: str) -> Any:
+        # Mirrors PostgREST's `column->>key` JSON text-extraction operator,
+        # used e.g. by _resolve_quoted_message's `.eq("metadata->>wamid", ...)`.
+        if col and "->>" in col:
+            base, key = col.split("->>", 1)
+            return (row.get(base) or {}).get(key)
+        return row.get(col)
+
     def _matches(self, row: dict[str, Any]) -> bool:
         for col, op, val in self._filters:
-            row_val = row.get(col)
+            row_val = self._resolve_col(row, col)
             if op == "eq" and row_val != val:
                 return False
             if op == "neq" and row_val == val:

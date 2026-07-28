@@ -374,6 +374,21 @@ def build_turn_context(
         f"Pets On File ({len(agent_ctx.pets)}): {json.dumps(agent_ctx.pets, default=str)}",
     ]
 
+    if extracted.quoted_wamid:
+        if agent_ctx.quoted_message_text:
+            lines.append(
+                f'The customer tapped "reply" on an earlier message and is asking about it specifically — '
+                f'quoted message: "{agent_ctx.quoted_message_text}". Answer the Current Message in the '
+                f"context of THIS quoted message, not whatever else is most recent in the conversation."
+            )
+        else:
+            lines.append(
+                "The customer tapped \"reply\" on an earlier message, but its text couldn't be looked up "
+                "(too old, or from before this existed) — if the Current Message reads as a vague reference "
+                "to it (\"what about this\", \"and this one\"), ask them to clarify what they're referring to "
+                "instead of guessing."
+            )
+
     if agent_ctx.active_pet:
         lines.append(
             f"Active pet: {agent_ctx.active_pet.get('name')} "
