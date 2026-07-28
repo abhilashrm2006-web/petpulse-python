@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 
 from app.config import Settings
 from app.integrations.media_processing import extract_video_audio, extract_video_frame
-from app.integrations.openai_client import analyze_audio, vision_completion
+from app.integrations.openai_client import transcribe_speech, vision_completion
 
 FRAME_SYSTEM_PROMPT = (
     "You are looking at a single still frame extracted from a video sent by a pet owner or vet. "
@@ -18,17 +18,6 @@ FRAME_SYSTEM_PROMPT = (
     "visible in this still image. You may be given background on the pet's known chronic "
     "conditions/allergies — use it only to sharpen your description, never to claim something isn't "
     "actually visible."
-)
-
-AUDIO_SYSTEM_PROMPT = (
-    "You are listening to the audio track of a video a pet owner sent about their pet's health. "
-    "Transcribe any speech. Also describe any non-speech sounds relevant to respiratory or physical "
-    "distress (wheezing, coughing, labored breathing, whimpering) — but be neutral and descriptive, "
-    "not alarmist: describe what you hear, don't diagnose a condition from it. If the audio is faint "
-    "or ambiguous, say so rather than over-interpreting it. You may be given background on the pet's "
-    "known chronic conditions (e.g. a history of asthma) — use that only to describe what you hear more "
-    "precisely (e.g. noting labored breathing sounds consistent with wheezing, given that history), "
-    "never to assert a diagnosis or claim a sound is present that you can't actually hear."
 )
 
 
@@ -49,9 +38,10 @@ async def analyze_video(
     if audio_bytes is None:
         return f"[Video frame analysis] {frame_analysis}\n\n[Video audio analysis] (no audio track)"
 
-    audio_b64 = base64.b64encode(audio_bytes).decode()
-    audio_analysis = await analyze_audio(
-        openai_client, settings, AUDIO_SYSTEM_PROMPT, f"{pet_context}Caption: {caption or '(none)'}", audio_b64, "mp3"
-    )
+    # Dedicated transcription endpoint, not chat.completions with an attached
+    # audio block -- see app/media_pipeline/audio.py's module docstring for
+    # why (confirmed live: the chat.completions approach silently ignored
+    # the audio ~80-90% of the time on real, otherwise-valid clips).
+    audio_analysis = await transcribe_speech(openai_client, settings, audio_bytes, filename="video_audio.mp3", prompt=pet_context)
 
     return f"[Video frame analysis] {frame_analysis}\n\n[Video audio analysis] {audio_analysis}"

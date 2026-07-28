@@ -153,34 +153,21 @@ async def synthesize_speech(client: AsyncOpenAI, settings: Settings, text: str, 
         return None
 
 
-async def transcribe_audio(client: AsyncOpenAI, audio_bytes: bytes, filename: str = "audio.ogg") -> str:
-    resp = await client.audio.transcriptions.create(model="whisper-1", file=(filename, audio_bytes))
-    return resp.text
-
-
-async def analyze_audio(
-    client: AsyncOpenAI,
-    settings: Settings,
-    system_prompt: str,
-    user_prompt: str,
-    audio_base64: str,
-    audio_format: str = "mp3",
+async def transcribe_speech(
+    client: AsyncOpenAI, settings: Settings, audio_bytes: bytes, filename: str = "audio.ogg", prompt: str = ""
 ) -> str:
-    """gpt-audio: transcribes speech AND describes non-speech sounds
-    (wheezing, coughing) for respiratory-symptom video/voice notes (spec
-    §5). Deliberately neutral prompt to avoid false-positive alarms."""
-    resp = await client.chat.completions.create(
-        model=settings.openai_audio_model,
-        modalities=["text"],
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_prompt},
-                    {"type": "input_audio", "input_audio": {"data": audio_base64, "format": audio_format}},
-                ],
-            },
-        ],
+    """Voice notes and video audio tracks -- the dedicated /v1/audio/
+    transcriptions endpoint (gpt-4o-transcribe), NOT chat.completions with
+    an input_audio content block (the old approach, see
+    settings.openai_transcription_model's docstring for why that was
+    replaced: confirmed live to silently ignore the attached audio and ask
+    for it again ~80-90% of the time). Accepts the raw downloaded bytes
+    directly (WhatsApp's native OGG/Opus included) -- no ffmpeg conversion
+    needed, confirmed live against a genuinely low-bitrate OGG. `prompt` is
+    OpenAI's supported way to bias transcription toward expected vocabulary
+    (e.g. the pet's name) via the same param real Whisper-family models use
+    for this, not a chat instruction."""
+    resp = await client.audio.transcriptions.create(
+        model=settings.openai_transcription_model, file=(filename, audio_bytes), prompt=prompt
     )
-    return resp.choices[0].message.content or ""
+    return resp.text

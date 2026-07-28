@@ -1,33 +1,21 @@
-"""Ports `Transcribe Audio` (spec §2), upgraded from plain Whisper
-transcription to gpt-audio — a voice note isn't always speech; a customer
-may record the actual sound of their pet coughing/wheezing with little or
-no talking, which pure speech-to-text would silently drop. Mirrors the
-video audio-track pipeline (video.py) for the same reason."""
-
-import base64
+"""Ports `Transcribe Audio` (spec §2) -- transcribes a WhatsApp voice note
+via the dedicated /v1/audio/transcriptions endpoint (gpt-4o-transcribe), not
+a chat.completions call with an attached audio block. The earlier approach
+(gpt-audio, "hear speech AND describe non-speech sounds like coughing")
+sounded better on paper but was confirmed live to silently ignore the
+attached audio and ask for it again on the large majority of real,
+otherwise-valid clean audio clips -- the direct cause of "bot doesn't
+understand voice notes" reports. Transcription-only trades away the
+non-speech-sound-description ambition, but reliably hearing the words said
+is worth far more than an unreliable bonus feature."""
 
 from openai import AsyncOpenAI
 
 from app.config import Settings
-from app.integrations.media_processing import convert_audio_to_mp3
-from app.integrations.openai_client import analyze_audio
-
-VOICE_NOTE_SYSTEM_PROMPT = (
-    "You are listening to a WhatsApp voice note a pet owner sent to a veterinary assistant. Transcribe "
-    "any speech. Also describe any non-speech sounds relevant to the pet's health (wheezing, coughing, "
-    "labored breathing, whimpering) if the pet itself is audible — but be neutral and descriptive, not "
-    "alarmist: describe what you hear, don't diagnose a condition from it. If the audio is faint or "
-    "ambiguous, say so rather than over-interpreting it. You may be given background on the pet's known "
-    "chronic conditions — use that only to describe what you hear more precisely, never to assert a "
-    "diagnosis or claim a sound is present that you can't actually hear."
-)
+from app.integrations.openai_client import transcribe_speech
 
 
 async def analyze_voice_note(
     client: AsyncOpenAI, settings: Settings, audio_bytes: bytes, pet_context: str = ""
 ) -> str:
-    mp3_bytes = await convert_audio_to_mp3(audio_bytes)
-    audio_b64 = base64.b64encode(mp3_bytes).decode()
-    return await analyze_audio(
-        client, settings, VOICE_NOTE_SYSTEM_PROMPT, pet_context or "(no additional pet background on file)", audio_b64, "mp3"
-    )
+    return await transcribe_speech(client, settings, audio_bytes, filename="voice_note.ogg", prompt=pet_context)

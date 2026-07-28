@@ -20,7 +20,19 @@ class Settings(BaseSettings):
     # just imitate one on a cheaper/smaller model.
     openai_agent_model: str = "gpt-5.4"
     openai_reasoning_model: str = "gpt-5.4"
-    openai_audio_model: str = "gpt-audio"
+    # Voice notes / video audio tracks: gpt-4o-transcribe via the dedicated
+    # /v1/audio/transcriptions endpoint, NOT gpt-audio via chat.completions
+    # with input_audio (the old approach) -- confirmed live via repeated
+    # real-audio testing that gpt-audio ignores the attached audio and asks
+    # for it again roughly 80-90% of the time, non-deterministically, on
+    # otherwise-valid clean audio. This is the direct cause of "bot doesn't
+    # understand voice notes" reports. The dedicated transcription endpoint
+    # was 100% reliable (multiple real clips, multiple retries each,
+    # including a genuinely low-bitrate WhatsApp-realistic OGG). Trade-off:
+    # transcription-only, no non-speech sound description (coughing/wheezing)
+    # the old approach aimed for -- not worth keeping given how unreliable it
+    # actually was; reliably hearing the words said is far more valuable.
+    openai_transcription_model: str = "gpt-4o-transcribe"
     openai_agent_max_tokens: int = 5600
     openai_agent_max_iterations: int = 10
     # TTS for regional-language voice replies (see app/integrations/openai_client.py
