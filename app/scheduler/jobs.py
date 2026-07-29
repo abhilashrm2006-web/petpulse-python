@@ -10,9 +10,13 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 
 from app.deps import AppContext
+from app.integrations import google_drive
 from app.integrations.supabase_client import get_pet_member_contacts, is_active_subscriber
+from app.media_pipeline.doctor_documents import extract_doctor_fields
 
 logger = logging.getLogger(__name__)
+
+DOCTOR_DRIVE_SYNC_MIME_ALLOWLIST = {"application/pdf", "image/jpeg", "image/png", "image/heic", "image/webp"}
 
 REENGAGEMENT_SILENCE_THRESHOLD = timedelta(hours=48)
 REENGAGEMENT_COOLDOWN = timedelta(days=7)
@@ -316,3 +320,88 @@ async def send_reengagement_nudges(ctx: AppContext) -> None:
             client.table("profiles").update({"last_reengagement_sent_at": profile.get("last_reengagement_sent_at")}).eq("id", profile["id"]).execute()
 
     await asyncio.gather(*(_check_and_nudge(p) for p in candidates))
+
+
+def _folder_signature(files: list[dict]) -> str:
+    """A cheap "did anything in this folder change since last sync" check --
+    the max modifiedTime across its files, string-compared (ISO 8601 sorts
+    correctly as a string) against what was stored on the draft last time,
+    so an unchanged folder doesn't get re-extracted (a real cost: a vision
+    LLM call) on every single run."""
+    times = [f.get("modifiedTime", "") for f in files]
+    return max(times) if times else ""
+
+
+async def sync_doctor_onboarding_drafts(ctx: AppContext) -> None:
+    """Watches a Google Drive folder of per-doctor subfolders (onboarding
+    documents a vet has sent over) and turns each into a draft an admin can
+    review, edit, and approve in the admin dashboard (app/admin/routes.py) --
+    never creates a real, active doctor account directly. See
+    app/media_pipeline/doctor_documents.py for the extraction itself and
+    app/integrations/google_drive.py for the read-only Drive access (a
+    service account shared on just this one folder)."""
+    if not ctx.settings.google_service_account_json or not ctx.settings.doctor_drive_folder_id:
+        return  # ops-level: feature not configured yet, skip silently
+
+    client = ctx.supabase
+    try:
+        subfolders = await google_drive.list_subfolders(ctx.settings, ctx.http, ctx.settings.doctor_drive_folder_id)
+    except Exception:
+        logger.exception("Failed to list doctor-onboarding Drive subfolders")
+        return
+
+    for folder in subfolders:
+        try:
+            await _sync_one_doctor_folder(ctx, client, folder)
+        except Exception:
+            logger.exception("Failed to sync doctor-onboarding folder %s (%s)", folder.get("name"), folder.get("id"))
+
+
+async def _sync_one_doctor_folder(ctx: AppContext, client, folder: dict) -> None:
+    folder_id = folder["id"]
+    existing_rows = (
+        client.table("doctor_onboarding_drafts").select("*").eq("drive_folder_id", folder_id).limit(1).execute().data
+    )
+    existing = existing_rows[0] if existing_rows else None
+    if existing and existing["status"] in ("approved", "rejected"):
+        return  # final state -- an admin already acted on this folder, never touch it again
+
+    files = await google_drive.list_files(ctx.settings, ctx.http, folder_id)
+    if not files:
+        return  # doctor hasn't uploaded anything yet
+
+    signature = _folder_signature(files)
+    if existing and existing.get("drive_folder_modified_time") == signature:
+        return  # nothing changed since last extraction, skip the LLM call
+
+    downloadable = [f for f in files if f.get("mimeType") in DOCTOR_DRIVE_SYNC_MIME_ALLOWLIST]
+    downloaded: list[tuple[bytes, str, str]] = []
+    for f in downloadable:
+        try:
+            data = await google_drive.download_file(ctx.settings, ctx.http, f["id"])
+            downloaded.append((data, f["mimeType"], f["name"]))
+        except Exception:
+            logger.exception("Failed to download doctor-onboarding file %s (%s)", f.get("name"), f.get("id"))
+
+    fields = await extract_doctor_fields(ctx.openai, ctx.settings, downloaded)
+    source_filenames = fields.pop("_source_filenames", [])
+
+    payload = {
+        "drive_folder_id": folder_id,
+        "drive_folder_name": folder["name"],
+        "drive_folder_modified_time": signature,
+        "status": "pending_review",
+        "extracted_full_name": fields.get("full_name"),
+        "extracted_phone_number": fields.get("phone_number"),
+        "extracted_email": fields.get("email"),
+        "extracted_qualification": fields.get("qualification"),
+        "extracted_registration_number": fields.get("registration_number"),
+        "extracted_specialization": fields.get("specialization"),
+        "extracted_gender": fields.get("gender"),
+        "extracted_date_of_birth": fields.get("date_of_birth"),
+        "extracted_city": fields.get("city"),
+        "extracted_area": fields.get("area"),
+        "source_files": [{"id": f["id"], "name": f["name"]} for f in files],
+        "extraction_notes": fields.get("notes"),
+    }
+    client.table("doctor_onboarding_drafts").upsert(payload, on_conflict="drive_folder_id").execute()

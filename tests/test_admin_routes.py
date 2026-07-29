@@ -379,6 +379,173 @@ async def test_onboard_doctor_requires_name_and_phone():
 
 
 @pytest.mark.asyncio
+async def test_onboard_doctor_sends_a_welcome_message():
+    supabase = FakeSupabaseClient()
+    ctx = _make_ctx(supabase)
+    request = _fake_request(ctx)
+
+    await admin_routes.onboard_doctor(request, {"full_name": "Dr. Rao", "phone_number": "919000000010"})
+
+    ctx.whatsapp.send_text.assert_awaited_once()
+    assert ctx.whatsapp.send_text.call_args.args[0] == "919000000010"
+    assert "Dr. Rao" in ctx.whatsapp.send_text.call_args.args[1]
+    assert "Veterinary Doctor" in ctx.whatsapp.send_text.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_onboard_doctor_still_succeeds_if_welcome_message_send_fails():
+    supabase = FakeSupabaseClient()
+    ctx = _make_ctx(supabase)
+    ctx.whatsapp.send_text = AsyncMock(side_effect=RuntimeError("WhatsApp outage"))
+    request = _fake_request(ctx)
+
+    result = await admin_routes.onboard_doctor(request, {"full_name": "Dr. Rao", "phone_number": "919000000010"})
+
+    assert result["success"] is True
+    assert supabase.rows("profiles")[0]["phone_number"] == "919000000010"
+
+
+# ---------------------------------------------------------------------------
+# Doctor onboarding drafts
+# ---------------------------------------------------------------------------
+
+
+def _make_draft(**overrides):
+    draft = {
+        "id": "draft-1",
+        "drive_folder_id": "folder-1",
+        "drive_folder_name": "Dr Mounika",
+        "status": "pending_review",
+        "extracted_full_name": "Dr. Mounika",
+        "extracted_phone_number": "919182381400",
+        "extracted_qualification": "B.V.Sc & A.H.",
+        "extracted_registration_number": "TSVC 02353/2024",
+    }
+    draft.update(overrides)
+    return draft
+
+
+@pytest.mark.asyncio
+async def test_list_doctor_drafts_defaults_to_pending_review():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_onboarding_drafts": [
+                _make_draft(id="d1", status="pending_review"),
+                _make_draft(id="d2", status="approved"),
+            ]
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_doctor_drafts(request)
+
+    assert result["count"] == 1
+    assert result["drafts"][0]["id"] == "d1"
+
+
+@pytest.mark.asyncio
+async def test_get_doctor_draft_404s_when_missing():
+    supabase = FakeSupabaseClient()
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.get_doctor_draft("nope", request)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_draft_fills_in_missing_fields():
+    supabase = FakeSupabaseClient(initial={"doctor_onboarding_drafts": [_make_draft()]})
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.update_doctor_draft("draft-1", request, {"extracted_email": "mounika@example.com"})
+
+    assert result["draft"]["extracted_email"] == "mounika@example.com"
+
+
+@pytest.mark.asyncio
+async def test_update_doctor_draft_rejects_once_reviewed():
+    supabase = FakeSupabaseClient(initial={"doctor_onboarding_drafts": [_make_draft(status="approved")]})
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.update_doctor_draft("draft-1", request, {"extracted_email": "x@example.com"})
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_approve_doctor_draft_creates_active_vet_and_sends_welcome():
+    supabase = FakeSupabaseClient(initial={"doctor_onboarding_drafts": [_make_draft()]})
+    ctx = _make_ctx(supabase)
+    request = _fake_request(ctx)
+
+    result = await admin_routes.approve_doctor_draft("draft-1", request)
+
+    assert result["success"] is True
+    doctor = result["doctor"]
+    assert doctor["role"] == "vet"
+    assert doctor["is_active"] is True
+    assert doctor["phone_number"] == "919182381400"
+    ctx.whatsapp.send_text.assert_awaited_once_with(
+        "919182381400", admin_routes.DOCTOR_WELCOME_MESSAGE.format(name="Dr. Mounika")
+    )
+    draft = supabase.rows("doctor_onboarding_drafts")[0]
+    assert draft["status"] == "approved"
+    assert draft["created_profile_id"] == doctor["id"]
+
+
+@pytest.mark.asyncio
+async def test_approve_doctor_draft_requires_name_and_phone_filled_in():
+    supabase = FakeSupabaseClient(
+        initial={"doctor_onboarding_drafts": [_make_draft(extracted_phone_number=None)]}
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.approve_doctor_draft("draft-1", request)
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_approve_doctor_draft_rejects_duplicate_phone_number():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_onboarding_drafts": [_make_draft()],
+            "profiles": [{"id": "existing", "phone_number": "919182381400", "role": "vet"}],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.approve_doctor_draft("draft-1", request)
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_approve_doctor_draft_rejects_already_reviewed():
+    supabase = FakeSupabaseClient(initial={"doctor_onboarding_drafts": [_make_draft(status="rejected")]})
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.approve_doctor_draft("draft-1", request)
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_reject_doctor_draft_marks_rejected_without_creating_a_profile():
+    supabase = FakeSupabaseClient(initial={"doctor_onboarding_drafts": [_make_draft()]})
+    ctx = _make_ctx(supabase)
+    request = _fake_request(ctx)
+
+    result = await admin_routes.reject_doctor_draft("draft-1", request)
+
+    assert result["success"] is True
+    assert result["draft"]["status"] == "rejected"
+    assert supabase.rows("profiles") == []
+    ctx.whatsapp.send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_deactivate_doctor_cancels_their_pending_sessions():
     supabase = FakeSupabaseClient(
         initial={

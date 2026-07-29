@@ -26,6 +26,7 @@ class _FakeQuery:
         self._payload: Any = None
         self._limit: int | None = None
         self._select_args: tuple = ()
+        self._on_conflict: str | None = None
 
     def select(self, *args, **_kwargs):
         self._op = self._op or "select"
@@ -40,6 +41,12 @@ class _FakeQuery:
     def update(self, payload):
         self._op = "update"
         self._payload = payload
+        return self
+
+    def upsert(self, payload, on_conflict: str | None = None):
+        self._op = "upsert"
+        self._payload = payload
+        self._on_conflict = on_conflict
         return self
 
     def delete(self):
@@ -206,6 +213,21 @@ class _FakeQuery:
                 table.append(row)
                 inserted.append(row)
             return _FakeResult(inserted)
+
+        if self._op == "upsert":
+            conflict_col = self._on_conflict or "id"
+            payloads = self._payload if isinstance(self._payload, list) else [self._payload]
+            result = []
+            for payload in payloads:
+                existing = next((row for row in table if row.get(conflict_col) == payload.get(conflict_col)), None)
+                if existing:
+                    existing.update(payload)
+                    result.append(existing)
+                else:
+                    row = {"id": str(uuid.uuid4()), **payload}
+                    table.append(row)
+                    result.append(row)
+            return _FakeResult(result)
 
         if self._op == "update":
             updated = []

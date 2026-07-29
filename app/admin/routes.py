@@ -254,6 +254,34 @@ DOCTOR_EDITABLE_FIELDS = [
     "consultation_fee", "area", "city", "hospital_name", "treatments", "opening_time", "closing_time",
 ]
 
+DOCTOR_WELCOME_MESSAGE = (
+    "Welcome to PetPulse, {name}! 🩺 You've been onboarded as a Veterinary Doctor on our platform. "
+    "You'll receive session requests, appointment updates, and prescription reminders right here on WhatsApp. "
+    "If you have any questions, just message us anytime."
+)
+
+
+async def _create_doctor_profile(ctx: AppContext, fields: dict[str, Any]) -> dict[str, Any]:
+    """Shared by manual onboarding (onboard_doctor) and the Drive-drafts
+    approval flow (approve_doctor_draft) so both paths create an identical
+    real profile row and both send the same welcome message — a doctor
+    shouldn't get a different experience depending on which route an admin
+    used to onboard them."""
+    row = (
+        ctx.supabase.table("profiles")
+        .insert({"role": "vet", "is_active": True, **fields})
+        .execute()
+        .data[0]
+    )
+    try:
+        await ctx.whatsapp.send_text(row["phone_number"], DOCTOR_WELCOME_MESSAGE.format(name=row.get("full_name") or "Doctor"))
+    except Exception:
+        # The account is already created at this point -- a delivery hiccup
+        # on the welcome message is a notification problem, not a reason to
+        # fail the onboarding itself.
+        logger.exception("Failed to send welcome message to newly onboarded doctor profile=%s", row["id"])
+    return row
+
 
 @router.get("/doctors")
 async def list_doctors(
@@ -330,29 +358,23 @@ async def onboard_doctor(request: Request, payload: dict[str, Any]) -> dict[str,
     if existing:
         raise HTTPException(status_code=409, detail="A profile with this phone number already exists")
 
-    row = (
-        ctx.supabase.table("profiles")
-        .insert(
-            {
-                "full_name": full_name,
-                "phone_number": phone_number,
-                "role": "vet",
-                "is_active": True,
-                "qualification": payload.get("qualification"),
-                "registration_number": payload.get("registration_number"),
-                "specialization": payload.get("specialization"),
-                "experience_years": payload.get("experience_years"),
-                "consultation_fee": payload.get("consultation_fee"),
-                "area": payload.get("area"),
-                "city": payload.get("city"),
-                "hospital_name": payload.get("hospital_name"),
-                "treatments": payload.get("treatments"),
-                "opening_time": payload.get("opening_time"),
-                "closing_time": payload.get("closing_time"),
-            }
-        )
-        .execute()
-        .data[0]
+    row = await _create_doctor_profile(
+        ctx,
+        {
+            "full_name": full_name,
+            "phone_number": phone_number,
+            "qualification": payload.get("qualification"),
+            "registration_number": payload.get("registration_number"),
+            "specialization": payload.get("specialization"),
+            "experience_years": payload.get("experience_years"),
+            "consultation_fee": payload.get("consultation_fee"),
+            "area": payload.get("area"),
+            "city": payload.get("city"),
+            "hospital_name": payload.get("hospital_name"),
+            "treatments": payload.get("treatments"),
+            "opening_time": payload.get("opening_time"),
+            "closing_time": payload.get("closing_time"),
+        },
     )
     return {"success": True, "doctor": row}
 
@@ -489,6 +511,126 @@ async def delete_doctor(profile_id: str, request: Request) -> dict[str, Any]:
     ctx.supabase.table("profiles").delete().eq("id", profile_id).execute()
 
     return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# Doctor onboarding drafts (Google Drive auto-sync — see
+# app/scheduler/jobs.py sync_doctor_onboarding_drafts). Never creates a real
+# doctor account directly; approve_doctor_draft is the only path from a
+# draft to a real profiles row, so every auto-extracted account still gets
+# a human review first.
+# ---------------------------------------------------------------------------
+
+DRAFT_EDITABLE_FIELDS = [
+    "extracted_full_name", "extracted_phone_number", "extracted_email", "extracted_qualification",
+    "extracted_registration_number", "extracted_specialization", "extracted_gender",
+    "extracted_date_of_birth", "extracted_city", "extracted_area",
+]
+
+
+@router.get("/doctor-drafts")
+async def list_doctor_drafts(request: Request, status: str = "pending_review") -> dict[str, Any]:
+    ctx = _ctx(request)
+    query = ctx.supabase.table("doctor_onboarding_drafts").select("*")
+    if status:
+        query = query.eq("status", status)
+    rows = query.order("created_at", desc=True).execute().data or []
+    return {"drafts": rows, "count": len(rows)}
+
+
+@router.get("/doctor-drafts/{draft_id}")
+async def get_doctor_draft(draft_id: str, request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("doctor_onboarding_drafts").select("*").eq("id", draft_id).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return {"draft": rows[0]}
+
+
+@router.patch("/doctor-drafts/{draft_id}")
+async def update_doctor_draft(draft_id: str, request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    """Lets an admin correct/fill in extracted fields before approving --
+    auto-extraction is best-effort (see app/media_pipeline/doctor_documents.py),
+    and fields like phone_number often aren't even printed on the source
+    documents at all."""
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("doctor_onboarding_drafts").select("id, status").eq("id", draft_id).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if rows[0]["status"] != "pending_review":
+        raise HTTPException(status_code=409, detail=f"Draft is already {rows[0]['status']}, cannot edit")
+
+    updates = {k: v for k, v in payload.items() if k in DRAFT_EDITABLE_FIELDS}
+    if not updates:
+        raise HTTPException(status_code=422, detail="No editable fields in payload")
+
+    row = ctx.supabase.table("doctor_onboarding_drafts").update(updates).eq("id", draft_id).execute().data[0]
+    return {"success": True, "draft": row}
+
+
+@router.post("/doctor-drafts/{draft_id}/approve")
+async def approve_doctor_draft(draft_id: str, request: Request) -> dict[str, Any]:
+    """Creates the real, active doctor profile from this draft's (possibly
+    admin-corrected) fields, sends the welcome message, and marks the draft
+    approved -- final, sync_doctor_onboarding_drafts never touches an
+    approved/rejected draft again even if the Drive folder changes later."""
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("doctor_onboarding_drafts").select("*").eq("id", draft_id).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    draft = rows[0]
+    if draft["status"] != "pending_review":
+        raise HTTPException(status_code=409, detail=f"Draft is already {draft['status']}")
+
+    full_name = (draft.get("extracted_full_name") or "").strip()
+    phone_number = (draft.get("extracted_phone_number") or "").strip()
+    if not full_name or not phone_number:
+        raise HTTPException(status_code=422, detail="full_name and phone_number must be filled in (via PATCH) before approving")
+
+    existing = ctx.supabase.table("profiles").select("id").eq("phone_number", phone_number).limit(1).execute().data
+    if existing:
+        raise HTTPException(status_code=409, detail="A profile with this phone number already exists")
+
+    doctor = await _create_doctor_profile(
+        ctx,
+        {
+            "full_name": full_name,
+            "phone_number": phone_number,
+            "email": draft.get("extracted_email"),
+            "qualification": draft.get("extracted_qualification"),
+            "registration_number": draft.get("extracted_registration_number"),
+            "specialization": draft.get("extracted_specialization"),
+            "gender": draft.get("extracted_gender"),
+            "date_of_birth": draft.get("extracted_date_of_birth"),
+            "city": draft.get("extracted_city"),
+            "area": draft.get("extracted_area"),
+        },
+    )
+
+    ctx.supabase.table("doctor_onboarding_drafts").update(
+        {"status": "approved", "created_profile_id": doctor["id"], "reviewed_at": datetime.utcnow().isoformat()}
+    ).eq("id", draft_id).execute()
+
+    return {"success": True, "doctor": doctor}
+
+
+@router.post("/doctor-drafts/{draft_id}/reject")
+async def reject_doctor_draft(draft_id: str, request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("doctor_onboarding_drafts").select("id, status").eq("id", draft_id).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if rows[0]["status"] != "pending_review":
+        raise HTTPException(status_code=409, detail=f"Draft is already {rows[0]['status']}")
+
+    row = (
+        ctx.supabase.table("doctor_onboarding_drafts")
+        .update({"status": "rejected", "reviewed_at": datetime.utcnow().isoformat()})
+        .eq("id", draft_id)
+        .execute()
+        .data[0]
+    )
+    return {"success": True, "draft": row}
 
 
 # ---------------------------------------------------------------------------

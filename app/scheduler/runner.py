@@ -11,6 +11,7 @@ from app.scheduler.jobs import (
     send_new_parent_followups,
     send_reengagement_nudges,
     send_vaccination_reminders,
+    sync_doctor_onboarding_drafts,
 )
 
 
@@ -24,6 +25,9 @@ def start_scheduler(ctx: AppContext) -> AsyncIOScheduler:
     # itself hour-granular, so a once-daily check could let a customer sit
     # silent for up to ~72h (48h + up to a day's slack) before being noticed.
     scheduler.add_job(send_reengagement_nudges, CronTrigger(hour="*/6", minute=15), args=[ctx], id="reengagement_nudges")
+    # No-op until google_service_account_json/doctor_drive_folder_id are set
+    # (see sync_doctor_onboarding_drafts) -- safe to always register.
+    scheduler.add_job(sync_doctor_onboarding_drafts, CronTrigger(hour="*/6", minute=30), args=[ctx], id="doctor_drive_sync")
 
     scheduler.start()
     return scheduler

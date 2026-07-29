@@ -89,6 +89,17 @@ class Settings(BaseSettings):
     # object -- no signed URL/expiry needed, it's a static brand asset.
     pulsy_welcome_sticker_url: str = "https://ngxjkxqualvhkyyjckvs.supabase.co/storage/v1/object/public/brand-assets/pulsy-welcome.webp"
 
+    # Doctor-onboarding-drafts sync (see app/integrations/google_drive.py,
+    # app/scheduler/jobs.py sync_doctor_onboarding_drafts) -- reads a Google
+    # Drive folder of per-doctor subfolders (onboarding documents: degree
+    # certs, registration certificates, ID cards) via a Google Cloud service
+    # account with read-only Viewer access shared on just that one folder,
+    # not a personal Gmail/OAuth login. The full downloaded service-account
+    # JSON key, stored as a single secret string (parsed at call time), and
+    # the parent folder's Drive ID.
+    google_service_account_json: str = ""
+    doctor_drive_folder_id: str = ""
+
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 
