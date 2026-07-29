@@ -45,6 +45,18 @@ def _ctx(request: Request) -> AppContext:
     return request.app.state.ctx
 
 
+# profiles.gender has a check constraint accepting only "Male"/"Female"/"Other"
+# (confirmed live -- lowercase or "Unknown" both 400). Document extraction
+# produces free-text/lowercase values, so it must be normalized before insert.
+_PROFILE_GENDER_VALUES = {"male": "Male", "female": "Female", "other": "Other"}
+
+
+def _normalize_profile_gender(value: str | None) -> str | None:
+    if not value:
+        return None
+    return _PROFILE_GENDER_VALUES.get(value.strip().lower())
+
+
 async def _cancel_pending_sessions(ctx: AppContext, *, profile_id: str | None = None, doctor_phone: str | None = None, role: str) -> int:
     query = ctx.supabase.table("doctor_sessions").select("id").in_("status", ACTIVE_SESSION_STATUSES)
     if profile_id:
@@ -620,7 +632,7 @@ async def approve_doctor_draft(draft_id: str, request: Request) -> dict[str, Any
             "qualification": draft.get("extracted_qualification"),
             "registration_number": draft.get("extracted_registration_number"),
             "specialization": draft.get("extracted_specialization"),
-            "gender": draft.get("extracted_gender"),
+            "gender": _normalize_profile_gender(draft.get("extracted_gender")),
             "date_of_birth": draft.get("extracted_date_of_birth"),
             "city": draft.get("extracted_city"),
             "area": draft.get("extracted_area"),

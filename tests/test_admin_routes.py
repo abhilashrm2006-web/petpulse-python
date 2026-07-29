@@ -494,6 +494,29 @@ async def test_approve_doctor_draft_creates_active_vet_and_sends_welcome():
     assert draft["created_profile_id"] == doctor["id"]
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("female", "Female"), ("Male", "Male"), ("OTHER", "Other"), ("", None), (None, None), ("nonbinary", None)],
+)
+def test_normalize_profile_gender(raw, expected):
+    # profiles.gender has a DB check constraint accepting only the exact
+    # strings "Male"/"Female"/"Other" -- confirmed live: lowercase values
+    # extracted from doctor documents (e.g. "female") 400 on insert, which
+    # crashed the whole approve-draft flow after the customer profile it
+    # replaces had already been deleted (see approve_doctor_draft).
+    assert admin_routes._normalize_profile_gender(raw) == expected
+
+
+@pytest.mark.asyncio
+async def test_approve_doctor_draft_normalizes_lowercase_gender():
+    supabase = FakeSupabaseClient(initial={"doctor_onboarding_drafts": [_make_draft(extracted_gender="female")]})
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.approve_doctor_draft("draft-1", request)
+
+    assert result["doctor"]["gender"] == "Female"
+
+
 @pytest.mark.asyncio
 async def test_approve_doctor_draft_requires_name_and_phone_filled_in():
     supabase = FakeSupabaseClient(
