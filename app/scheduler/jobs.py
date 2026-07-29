@@ -9,9 +9,10 @@ import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 
+from app.availability.slots import IST
 from app.deps import AppContext
 from app.integrations import google_drive
-from app.integrations.supabase_client import get_pet_member_contacts, is_active_subscriber
+from app.integrations.supabase_client import get_pet_member_contacts, is_active_subscriber, is_unique_violation
 from app.media_pipeline.doctor_documents import extract_doctor_fields
 
 logger = logging.getLogger(__name__)
@@ -405,3 +406,97 @@ async def _sync_one_doctor_folder(ctx: AppContext, client, folder: dict) -> None
         "extraction_notes": fields.get("notes"),
     }
     client.table("doctor_onboarding_drafts").upsert(payload, on_conflict="drive_folder_id").execute()
+
+
+REMINDER_TYPE_LABELS = {"day_before": "Tomorrow's Schedule", "day_of": "Today's Schedule"}
+
+
+def _format_appointment_line(row: dict, pet_name: str, customer_name: str) -> str:
+    start = datetime.fromisoformat(row["preferred_time"])
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=IST)
+    time_str = start.astimezone(IST).strftime("%I:%M %p").lstrip("0")
+    line = f"• {time_str} — {pet_name} ({customer_name})"
+    if row.get("case_summary"):
+        line += f" — {row['case_summary']}"
+    return line
+
+
+async def send_doctor_schedule_reminders(ctx: AppContext, reminder_type: str) -> None:
+    """T-1 (evening before) and T-0 (morning of) appointment-schedule pushes
+    for doctors, so a vet has their day planned without needing to message
+    the bot first -- unlike the customer-facing reminders above, this is
+    purely a proactive push (no "did they reply recently" gating), since a
+    working vet needs their schedule regardless of how active they've been
+    in chat. Only sent to a doctor who actually has at least one accepted
+    session that day -- no "you have nothing scheduled" noise for every
+    idle vet, every single day. `reminder_type` is "day_before" (target
+    date = tomorrow, meant to run in the evening) or "day_of" (target date
+    = today, meant to run in the morning) -- two separate scheduler
+    triggers call this with different values (see app/scheduler/runner.py)."""
+    client = ctx.supabase
+    today = date.today()
+    target_date = today + timedelta(days=1) if reminder_type == "day_before" else today
+    window_start = datetime.combine(target_date, datetime.min.time(), tzinfo=IST).isoformat()
+    window_end = datetime.combine(target_date + timedelta(days=1), datetime.min.time(), tzinfo=IST).isoformat()
+
+    rows = (
+        client.table("doctor_sessions")
+        .select("id, doctor_phone, preferred_time, case_summary, profile_id, pet_id")
+        .eq("status", "accepted")
+        .gte("preferred_time", window_start)
+        .lt("preferred_time", window_end)
+        .order("preferred_time")
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        return
+
+    by_doctor: dict[str, list[dict]] = {}
+    for row in rows:
+        by_doctor.setdefault(row["doctor_phone"], []).append(row)
+
+    for doctor_phone, sessions in by_doctor.items():
+        # Atomic claim-by-insert BEFORE sending: this cron fires once per worker
+        # process (in-process APScheduler) and once per any future horizontal
+        # replica, so without claiming first, every worker/replica would
+        # independently see the same day's sessions and send the doctor the
+        # same schedule N times. Unlike the vaccination/re-engagement jobs'
+        # conditional-UPDATE claim, this is a pure insert-or-conflict claim
+        # (same idiom as claim_message_id) since there's no pre-existing row
+        # to update -- this table only ever records "was this specific
+        # reminder already sent".
+        try:
+            client.table("doctor_schedule_reminders_sent").insert(
+                {"doctor_phone": doctor_phone, "reminder_type": reminder_type, "reminder_date": target_date.isoformat()}
+            ).execute()
+        except Exception as exc:
+            if is_unique_violation(exc):
+                continue  # already sent for this doctor/date/type
+            logger.exception("Failed to claim schedule reminder for doctor=%s", doctor_phone)
+            continue
+
+        lines = []
+        for row in sessions:
+            profile_rows = client.table("profiles").select("full_name").eq("id", row["profile_id"]).limit(1).execute().data
+            customer_name = (profile_rows[0].get("full_name") if profile_rows else None) or "Pet Parent"
+            pet_rows = client.table("pets").select("name").eq("id", row["pet_id"]).limit(1).execute().data if row.get("pet_id") else []
+            pet_name = (pet_rows[0].get("name") if pet_rows else None) or "Pet"
+            lines.append(_format_appointment_line(row, pet_name, customer_name))
+
+        day_label = target_date.strftime("%a %d %b")
+        header = f"📅 *{REMINDER_TYPE_LABELS[reminder_type]} — {day_label}*\n({len(sessions)} appointment{'s' if len(sessions) != 1 else ''})\n"
+        text = header + "\n".join(lines)
+
+        try:
+            await ctx.whatsapp.send_text(doctor_phone, text)
+        except Exception:
+            logger.exception("Failed to send schedule reminder to doctor=%s", doctor_phone)
+            # Revert the claim so a transient send failure doesn't silently
+            # skip this doctor's reminder forever -- if this job somehow runs
+            # again the same day (e.g. a mid-day restart), it gets retried.
+            client.table("doctor_schedule_reminders_sent").delete().eq("doctor_phone", doctor_phone).eq(
+                "reminder_type", reminder_type
+            ).eq("reminder_date", target_date.isoformat()).execute()

@@ -12,6 +12,17 @@ class FakeUniqueViolation(Exception):
         return "duplicate key value violates unique constraint (23505)"
 
 
+# Real unique constraints these tests rely on, mirrored here so insert()
+# actually enforces them (a plain per-table __force_conflict__ toggle can't
+# express "this specific composite key conflicts, but a different one
+# doesn't", which the claim-by-insert pattern's own tests need).
+UNIQUE_CONSTRAINTS: dict[str, list[tuple[str, ...]]] = {
+    "processed_messages": [("message_id",)],
+    "doctor_onboarding_drafts": [("drive_folder_id",)],
+    "doctor_schedule_reminders_sent": [("doctor_phone", "reminder_type", "reminder_date")],
+}
+
+
 class _FakeResult:
     def __init__(self, data: list[dict[str, Any]]):
         self.data = data
@@ -207,6 +218,10 @@ class _FakeQuery:
             if self._table_name in self._store.get("__force_conflict__", set()):
                 raise FakeUniqueViolation()
             payloads = self._payload if isinstance(self._payload, list) else [self._payload]
+            for payload in payloads:
+                for key_cols in UNIQUE_CONSTRAINTS.get(self._table_name, []):
+                    if any(all(row.get(c) == payload.get(c) for c in key_cols) for row in table):
+                        raise FakeUniqueViolation()
             inserted = []
             for payload in payloads:
                 row = {"id": str(uuid.uuid4()), **payload}

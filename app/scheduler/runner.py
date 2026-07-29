@@ -8,6 +8,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.deps import AppContext
 from app.scheduler.jobs import (
     retain_chat_history,
+    send_doctor_schedule_reminders,
     send_new_parent_followups,
     send_reengagement_nudges,
     send_vaccination_reminders,
@@ -28,6 +29,16 @@ def start_scheduler(ctx: AppContext) -> AsyncIOScheduler:
     # No-op until google_service_account_json/doctor_drive_folder_id are set
     # (see sync_doctor_onboarding_drafts) -- safe to always register.
     scheduler.add_job(sync_doctor_onboarding_drafts, CronTrigger(hour="*/6", minute=30), args=[ctx], id="doctor_drive_sync")
+    # T-1 (evening before) and T-0 (morning of) doctor appointment-schedule
+    # pushes -- two separate triggers calling the same function with a
+    # different reminder_type, since "day before" and "day of" naturally
+    # happen at different times of day (see send_doctor_schedule_reminders).
+    scheduler.add_job(
+        send_doctor_schedule_reminders, CronTrigger(hour=19, minute=0), args=[ctx, "day_before"], id="doctor_schedule_day_before"
+    )
+    scheduler.add_job(
+        send_doctor_schedule_reminders, CronTrigger(hour=7, minute=0), args=[ctx, "day_of"], id="doctor_schedule_day_of"
+    )
 
     scheduler.start()
     return scheduler
