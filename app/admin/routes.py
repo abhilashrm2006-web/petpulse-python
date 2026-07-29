@@ -599,7 +599,8 @@ async def approve_doctor_draft(draft_id: str, request: Request) -> dict[str, Any
     if not full_name or not phone_number:
         raise HTTPException(status_code=422, detail="full_name and phone_number must be filled in (via PATCH) before approving")
 
-    existing = ctx.supabase.table("profiles").select("id,role,full_name").eq("phone_number", phone_number).limit(1).execute().data
+    existing = ctx.supabase.table("profiles").select("*").eq("phone_number", phone_number).limit(1).execute().data
+    replaced_customer: dict[str, Any] | None = None
     if existing:
         other = existing[0]
         if other.get("role") != "customer":
@@ -618,26 +619,41 @@ async def approve_doctor_draft(draft_id: str, request: Request) -> dict[str, Any
         # onboarded as a vet -- keep the doctor identity, drop the customer
         # one (same cleanup as the standalone delete-customer endpoint, since
         # a hard delete hits FK constraints that don't cascade automatically).
+        # profiles.phone_number is unique, so the old row must go before the
+        # new one can be inserted -- keep a full snapshot so a failure in
+        # doctor-profile creation (any DB constraint, not just the gender one
+        # already normalized above) can restore it rather than leaving this
+        # person with no profile at all, which happened once in production.
         await _cancel_pending_sessions(ctx, profile_id=other["id"], role="customer")
         await _cancel_active_subscription(ctx, other["id"])
         await _purge_blocking_references(ctx, other["id"])
         ctx.supabase.table("profiles").delete().eq("id", other["id"]).execute()
+        replaced_customer = other
 
-    doctor = await _create_doctor_profile(
-        ctx,
-        {
-            "full_name": full_name,
-            "phone_number": phone_number,
-            "email": draft.get("extracted_email"),
-            "qualification": draft.get("extracted_qualification"),
-            "registration_number": draft.get("extracted_registration_number"),
-            "specialization": draft.get("extracted_specialization"),
-            "gender": _normalize_profile_gender(draft.get("extracted_gender")),
-            "date_of_birth": draft.get("extracted_date_of_birth"),
-            "city": draft.get("extracted_city"),
-            "area": draft.get("extracted_area"),
-        },
-    )
+    try:
+        doctor = await _create_doctor_profile(
+            ctx,
+            {
+                "full_name": full_name,
+                "phone_number": phone_number,
+                "email": draft.get("extracted_email"),
+                "qualification": draft.get("extracted_qualification"),
+                "registration_number": draft.get("extracted_registration_number"),
+                "specialization": draft.get("extracted_specialization"),
+                "gender": _normalize_profile_gender(draft.get("extracted_gender")),
+                "date_of_birth": draft.get("extracted_date_of_birth"),
+                "city": draft.get("extracted_city"),
+                "area": draft.get("extracted_area"),
+            },
+        )
+    except Exception:
+        if replaced_customer is not None:
+            # Best-effort restore -- re-insert the exact row we deleted so a
+            # constraint failure here doesn't leave this person with no
+            # profile at all (the purged session/followup/guide rows aren't
+            # recovered, but those were empty in the one case this hit).
+            ctx.supabase.table("profiles").insert(replaced_customer).execute()
+        raise
 
     ctx.supabase.table("doctor_onboarding_drafts").update(
         {"status": "approved", "created_profile_id": doctor["id"], "reviewed_at": datetime.utcnow().isoformat()}

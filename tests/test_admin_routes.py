@@ -3,7 +3,7 @@ same approach as test_main_passport.py) against FakeSupabaseClient. Auth
 itself is covered separately in test_admin_auth.py."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -515,6 +515,29 @@ async def test_approve_doctor_draft_normalizes_lowercase_gender():
     result = await admin_routes.approve_doctor_draft("draft-1", request)
 
     assert result["doctor"]["gender"] == "Female"
+
+
+@pytest.mark.asyncio
+async def test_approve_doctor_draft_restores_customer_profile_if_doctor_creation_fails():
+    """The replaced-customer cleanup deletes the old row before the new vet
+    row can be inserted (phone_number is unique) -- if profile creation then
+    fails for any reason, the deleted customer profile must come back rather
+    than leaving this person with no profile at all, which happened once in
+    production (a gender check-constraint violation slipped through)."""
+    customer = {"id": "existing-customer", "phone_number": "919182381400", "role": "customer", "full_name": "Existing Person"}
+    supabase = FakeSupabaseClient(
+        initial={"doctor_onboarding_drafts": [_make_draft()], "profiles": [customer]}
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    with patch.object(admin_routes, "_create_doctor_profile", AsyncMock(side_effect=RuntimeError("boom"))):
+        with pytest.raises(RuntimeError):
+            await admin_routes.approve_doctor_draft("draft-1", request)
+
+    profiles = supabase.rows("profiles")
+    assert any(p["id"] == "existing-customer" and p["role"] == "customer" for p in profiles)
+    draft = supabase.rows("doctor_onboarding_drafts")[0]
+    assert draft["status"] == "pending_review"
 
 
 @pytest.mark.asyncio
