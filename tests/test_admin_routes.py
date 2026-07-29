@@ -511,7 +511,7 @@ async def test_approve_doctor_draft_rejects_duplicate_phone_number():
     supabase = FakeSupabaseClient(
         initial={
             "doctor_onboarding_drafts": [_make_draft()],
-            "profiles": [{"id": "existing", "phone_number": "919182381400", "role": "vet"}],
+            "profiles": [{"id": "existing", "phone_number": "919182381400", "role": "customer", "full_name": "Existing Person"}],
         }
     )
     request = _fake_request(_make_ctx(supabase))
@@ -519,6 +519,11 @@ async def test_approve_doctor_draft_rejects_duplicate_phone_number():
     with pytest.raises(HTTPException) as exc:
         await admin_routes.approve_doctor_draft("draft-1", request)
     assert exc.value.status_code == 409
+    # The message must name the actual conflicting role/person so an admin
+    # can tell "already a customer" apart from "already a vet" -- a bare
+    # "already exists" gave no way to decide how to resolve the conflict.
+    assert "customer" in exc.value.detail
+    assert "Existing Person" in exc.value.detail
 
 
 @pytest.mark.asyncio

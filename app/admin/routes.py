@@ -587,9 +587,17 @@ async def approve_doctor_draft(draft_id: str, request: Request) -> dict[str, Any
     if not full_name or not phone_number:
         raise HTTPException(status_code=422, detail="full_name and phone_number must be filled in (via PATCH) before approving")
 
-    existing = ctx.supabase.table("profiles").select("id").eq("phone_number", phone_number).limit(1).execute().data
+    existing = ctx.supabase.table("profiles").select("id,role,full_name").eq("phone_number", phone_number).limit(1).execute().data
     if existing:
-        raise HTTPException(status_code=409, detail="A profile with this phone number already exists")
+        other = existing[0]
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Phone {phone_number} already belongs to an existing {other.get('role', 'profile')} profile "
+                f"({other.get('full_name') or other['id']}). Correct the phone number on this draft first, "
+                f"or resolve the conflicting profile, before approving."
+            ),
+        )
 
     doctor = await _create_doctor_profile(
         ctx,
