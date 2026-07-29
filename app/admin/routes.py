@@ -590,14 +590,26 @@ async def approve_doctor_draft(draft_id: str, request: Request) -> dict[str, Any
     existing = ctx.supabase.table("profiles").select("id,role,full_name").eq("phone_number", phone_number).limit(1).execute().data
     if existing:
         other = existing[0]
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Phone {phone_number} already belongs to an existing {other.get('role', 'profile')} profile "
-                f"({other.get('full_name') or other['id']}). Correct the phone number on this draft first, "
-                f"or resolve the conflicting profile, before approving."
-            ),
-        )
+        if other.get("role") != "customer":
+            # A genuine duplicate (e.g. already a vet) -- not something to
+            # silently resolve, needs an admin decision.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Phone {phone_number} already belongs to an existing {other.get('role', 'profile')} profile "
+                    f"({other.get('full_name') or other['id']}). Correct the phone number on this draft first, "
+                    f"or resolve the conflicting profile, before approving."
+                ),
+            )
+        # Same phone number under a customer profile just means this person
+        # signed up/explored the product as a pet owner before being
+        # onboarded as a vet -- keep the doctor identity, drop the customer
+        # one (same cleanup as the standalone delete-customer endpoint, since
+        # a hard delete hits FK constraints that don't cascade automatically).
+        await _cancel_pending_sessions(ctx, profile_id=other["id"], role="customer")
+        await _cancel_active_subscription(ctx, other["id"])
+        await _purge_blocking_references(ctx, other["id"])
+        ctx.supabase.table("profiles").delete().eq("id", other["id"]).execute()
 
     doctor = await _create_doctor_profile(
         ctx,

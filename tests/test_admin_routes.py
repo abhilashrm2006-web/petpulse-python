@@ -507,11 +507,11 @@ async def test_approve_doctor_draft_requires_name_and_phone_filled_in():
 
 
 @pytest.mark.asyncio
-async def test_approve_doctor_draft_rejects_duplicate_phone_number():
+async def test_approve_doctor_draft_rejects_duplicate_phone_number_for_existing_vet():
     supabase = FakeSupabaseClient(
         initial={
             "doctor_onboarding_drafts": [_make_draft()],
-            "profiles": [{"id": "existing", "phone_number": "919182381400", "role": "customer", "full_name": "Existing Person"}],
+            "profiles": [{"id": "existing", "phone_number": "919182381400", "role": "vet", "full_name": "Existing Person"}],
         }
     )
     request = _fake_request(_make_ctx(supabase))
@@ -520,10 +520,34 @@ async def test_approve_doctor_draft_rejects_duplicate_phone_number():
         await admin_routes.approve_doctor_draft("draft-1", request)
     assert exc.value.status_code == 409
     # The message must name the actual conflicting role/person so an admin
-    # can tell "already a customer" apart from "already a vet" -- a bare
+    # can tell "already a vet" apart from "already a customer" -- a bare
     # "already exists" gave no way to decide how to resolve the conflict.
-    assert "customer" in exc.value.detail
+    assert "vet" in exc.value.detail
     assert "Existing Person" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_approve_doctor_draft_replaces_matching_customer_profile():
+    """Same phone number under a customer profile just means this person
+    explored the product as a pet owner before being onboarded as a vet --
+    the customer identity should be dropped in favor of the doctor one,
+    not block the approval."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_onboarding_drafts": [_make_draft()],
+            "profiles": [{"id": "existing-customer", "phone_number": "919182381400", "role": "customer", "full_name": "Existing Person"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    request = _fake_request(ctx)
+
+    result = await admin_routes.approve_doctor_draft("draft-1", request)
+
+    assert result["success"] is True
+    assert result["doctor"]["role"] == "vet"
+    profiles = supabase.rows("profiles")
+    assert not any(p["id"] == "existing-customer" for p in profiles)
+    assert any(p["phone_number"] == "919182381400" and p["role"] == "vet" for p in profiles)
 
 
 @pytest.mark.asyncio
