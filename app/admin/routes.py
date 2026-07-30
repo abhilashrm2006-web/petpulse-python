@@ -229,6 +229,9 @@ async def list_customers(
     status: str = "",
     stage: str = "",
     intent: str = "",
+    active_from: str = "",
+    active_to: str = "",
+    active: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -244,12 +247,18 @@ async def list_customers(
         # directly at the DB level -- "unrated" means the background job
         # hasn't gotten to them yet or they have no messages at all.
         query = query.is_("intent_rating", "null") if intent.lower() == "unrated" else query.eq("intent_rating", intent)
+    if active.lower() == "never":
+        query = query.is_("last_active_at", "null")
     if date_from:
         query = query.gte("created_at", date_from)
     if date_to:
         # Inclusive of the whole "to" day -- a bare date string sorts before
         # any timestamp on that same day, so a plain lte would exclude it.
         query = query.lte("created_at", f"{date_to}T23:59:59")
+    if active_from:
+        query = query.gte("last_active_at", active_from)
+    if active_to:
+        query = query.lte("last_active_at", f"{active_to}T23:59:59")
     rows = query.order("created_at", desc=True).execute().data or []
 
     profile_ids = [r["id"] for r in rows]

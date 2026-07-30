@@ -440,6 +440,43 @@ async def test_list_customers_filters_by_intent():
 
 
 @pytest.mark.asyncio
+async def test_list_customers_filters_by_last_active_date_range():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "Recent", "phone_number": "919000000001", "created_at": "2026-01-01", "last_active_at": "2026-06-15T10:00:00"},
+                {"id": "c2", "role": "customer", "full_name": "Old", "phone_number": "919000000002", "created_at": "2026-01-02", "last_active_at": "2026-01-01T10:00:00"},
+                {"id": "c3", "role": "customer", "full_name": "Never", "phone_number": "919000000003", "created_at": "2026-01-03"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request, active_from="2026-06-01", active_to="2026-06-30")
+
+    assert result["count"] == 1
+    assert result["customers"][0]["full_name"] == "Recent"
+
+
+@pytest.mark.asyncio
+async def test_list_customers_filters_by_never_active():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "Recent", "phone_number": "919000000001", "created_at": "2026-01-01", "last_active_at": "2026-06-15T10:00:00"},
+                {"id": "c2", "role": "customer", "full_name": "Never", "phone_number": "919000000002", "created_at": "2026-01-02"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request, active="never")
+
+    assert result["count"] == 1
+    assert result["customers"][0]["full_name"] == "Never"
+
+
+@pytest.mark.asyncio
 async def test_rate_customer_intent_endpoint_stores_result():
     supabase = FakeSupabaseClient(
         initial={
