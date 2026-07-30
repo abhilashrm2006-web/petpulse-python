@@ -365,32 +365,39 @@ async def send_onboarding_reminders(ctx: AppContext) -> None:
         and (not p.get("last_onboarding_reminder_sent_at") or p["last_onboarding_reminder_sent_at"] < cooldown_cutoff.isoformat())
     ]
 
+    # Bounded concurrency, same reasoning as send_reengagement_nudges --
+    # unbounded gather() is fine at today's scale (a handful of DB writes)
+    # but not something to leave uncapped as the stuck-onboarding cohort
+    # grows, since every candidate here also makes a WhatsApp send call.
+    semaphore = asyncio.Semaphore(REENGAGEMENT_LOOKUP_CONCURRENCY)
+
     async def _remind(profile: dict) -> None:
-        # Atomic claim BEFORE sending, same idempotency reasoning as every
-        # other job here -- prevents a double-nudge if this ever runs on
-        # more than one worker/replica.
-        claimed = (
-            client.table("profiles")
-            .update({"last_onboarding_reminder_sent_at": now.isoformat()})
-            .eq("id", profile["id"])
-            .or_(f"last_onboarding_reminder_sent_at.is.null,last_onboarding_reminder_sent_at.lt.{cooldown_cutoff.isoformat()}")
-            .execute()
-            .data
-        )
-        if not claimed:
-            return
-        phone = profile.get("phone_number")
-        if not phone:
-            return
-        try:
-            await ctx.whatsapp.send_text(phone, _onboarding_reminder_text(profile))
-        except Exception:
-            logger.exception("Failed to send onboarding reminder to %s", phone)
-            # Revert the claim so a transient send failure doesn't silently
-            # block this customer from ever being reminded again.
-            client.table("profiles").update(
-                {"last_onboarding_reminder_sent_at": profile.get("last_onboarding_reminder_sent_at")}
-            ).eq("id", profile["id"]).execute()
+        async with semaphore:
+            # Atomic claim BEFORE sending, same idempotency reasoning as every
+            # other job here -- prevents a double-nudge if this ever runs on
+            # more than one worker/replica.
+            claimed = (
+                client.table("profiles")
+                .update({"last_onboarding_reminder_sent_at": now.isoformat()})
+                .eq("id", profile["id"])
+                .or_(f"last_onboarding_reminder_sent_at.is.null,last_onboarding_reminder_sent_at.lt.{cooldown_cutoff.isoformat()}")
+                .execute()
+                .data
+            )
+            if not claimed:
+                return
+            phone = profile.get("phone_number")
+            if not phone:
+                return
+            try:
+                await ctx.whatsapp.send_text(phone, _onboarding_reminder_text(profile))
+            except Exception:
+                logger.exception("Failed to send onboarding reminder to %s", phone)
+                # Revert the claim so a transient send failure doesn't silently
+                # block this customer from ever being reminded again.
+                client.table("profiles").update(
+                    {"last_onboarding_reminder_sent_at": profile.get("last_onboarding_reminder_sent_at")}
+                ).eq("id", profile["id"]).execute()
 
     await asyncio.gather(*(_remind(p) for p in candidates))
 
