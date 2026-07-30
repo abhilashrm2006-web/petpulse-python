@@ -7,6 +7,7 @@ turn context (see system_prompt.build_turn_context), not a routed action."""
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from app.agent import memory
@@ -265,6 +266,17 @@ async def run_agent_turn(
         client.table("messages").insert([inbound_row, *outbound_rows]).execute()
     except Exception:
         logger.exception("Failed to log conversation/messages for profile=%s", agent_ctx.profile["id"])
+
+    if role != "vet":
+        try:
+            # Indexed column so the admin dashboard can show "last active" /
+            # derive a customer-journey stage without a per-profile scan of
+            # the messages table (see app/admin/routes.py customer stage).
+            client.table("profiles").update(
+                {"last_active_at": datetime.now(timezone.utc).isoformat()}
+            ).eq("id", agent_ctx.profile["id"]).execute()
+        except Exception:
+            logger.exception("Failed to update last_active_at for profile=%s", agent_ctx.profile["id"])
 
     if role != "vet":
         try:

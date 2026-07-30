@@ -7,7 +7,7 @@ notified parties) a customer-initiated one would."""
 
 import logging
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -107,6 +107,94 @@ def _subscription_category(profile: dict[str, Any], subscription: dict[str, Any]
     return "Free"
 
 
+REGISTRATION_STEP_LABELS = {
+    "awaiting_member_type": "choosing new vs. existing member",
+    "awaiting_customer_name": "entering their name",
+    "awaiting_pet_name": "entering their pet's name",
+    "awaiting_pet_dob": "entering their pet's date of birth",
+    "awaiting_pet_age": "entering their pet's age",
+    "awaiting_pet_weight": "entering their pet's weight",
+    "awaiting_kci_status": "answering the KCI certificate question",
+    "awaiting_vaccination_status": "answering the vaccination status question",
+    "awaiting_microchip_status": "answering the microchip question",
+    "awaiting_microchip_number": "entering their pet's microchip number",
+    "awaiting_city": "entering their city",
+    "awaiting_tier_choice": "choosing a plan",
+    "awaiting_free_subchoice": "choosing a free-plan option",
+    "awaiting_existing_phone": "verifying their existing-member phone number",
+    "awaiting_existing_verify": "verifying their identity as an existing member",
+}
+
+
+def _relative_time(iso_ts: str | None) -> str | None:
+    if not iso_ts:
+        return None
+    then = datetime.fromisoformat(iso_ts)
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - then
+    hours = delta.total_seconds() / 3600
+    if hours < 1:
+        return "just now"
+    if hours < 48:
+        return f"{int(hours)}h ago"
+    return f"{int(hours // 24)}d ago"
+
+
+def _compute_customer_stage(
+    profile: dict[str, Any], sessions: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """A one-line "where is this customer right now, and do they need me to
+    reach out" summary for the admin dashboard -- checked in priority order,
+    most actionable first, so e.g. a customer mid-onboarding who also has a
+    year-old completed session still shows as "onboarding", not "active"."""
+    step = profile.get("registration_step")
+    if step and step != "completed":
+        return {
+            "code": "onboarding",
+            "label": "Onboarding incomplete",
+            "detail": f"Stuck at {REGISTRATION_STEP_LABELS.get(step, step)}",
+        }
+
+    active = sorted(
+        (s for s in sessions if s.get("status") in ACTIVE_SESSION_STATUSES),
+        key=lambda s: s.get("created_at") or "",
+        reverse=True,
+    )
+    if active:
+        s = active[0]
+        if s["status"] == "pending":
+            if s.get("doctor_phone") == "pending_doctor_choice":
+                return {"code": "booking", "label": "Choosing a vet", "detail": "Picking a doctor from the list"}
+            return {"code": "booking", "label": "Waiting on doctor", "detail": "Vet chosen, awaiting their response"}
+        if s["status"] == "negotiating":
+            waiting_on = "the doctor" if s.get("awaiting_from") == "doctor_time_input" else "the customer"
+            return {"code": "negotiating", "label": "Negotiating appointment time", "detail": f"Waiting on {waiting_on}"}
+        if s["status"] == "accepted":
+            if s.get("payment_status") == "awaiting":
+                return {"code": "payment", "label": "Awaiting payment", "detail": f"Booked for {s.get('preferred_time') or 'TBD'}"}
+            if s.get("awaiting_from") == "doctor_prescription":
+                return {"code": "prescription", "label": "Awaiting prescription", "detail": "Consultation done, doctor hasn't sent it yet"}
+            return {"code": "upcoming", "label": "Appointment upcoming", "detail": f"Booked for {s.get('preferred_time') or 'TBD'}"}
+
+    followups = [s for s in sessions if s.get("status") == "completed" and s.get("follow_up_required")]
+    if followups:
+        followups.sort(key=lambda s: s.get("follow_up_date") or "")
+        return {"code": "followup", "label": "Follow-up needed", "detail": f"Due {followups[0].get('follow_up_date') or 'soon'}"}
+
+    last_active = profile.get("last_active_at")
+    if last_active:
+        then = datetime.fromisoformat(last_active)
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=timezone.utc)
+        hours = (datetime.now(timezone.utc) - then).total_seconds() / 3600
+        if hours < 48:
+            return {"code": "active", "label": "Active", "detail": f"Last messaged {_relative_time(last_active)}"}
+        return {"code": "inactive", "label": "Gone quiet", "detail": f"No message in {int(hours // 24)}d"}
+
+    return {"code": "new", "label": "New / no activity yet", "detail": "Hasn't messaged the bot since onboarding"}
+
+
 @router.get("/customers")
 async def list_customers(
     request: Request,
@@ -170,6 +258,25 @@ async def list_customers(
     total_count = len(rows)
     rows = rows[offset:offset + limit] if offset else rows[:limit]
 
+    # Stage is computed only for the current page, not the full filtered set --
+    # unlike tier/breed it's not filterable/sortable yet, so there's no reason
+    # to pay for it on rows that pagination is about to discard.
+    page_ids = [r["id"] for r in rows]
+    sessions_by_profile: dict[str, list[dict[str, Any]]] = {}
+    if page_ids:
+        session_rows = (
+            ctx.supabase.table("doctor_sessions")
+            .select("status,doctor_phone,payment_status,awaiting_from,preferred_time,created_at,follow_up_required,follow_up_date,profile_id")
+            .in_("profile_id", page_ids).execute().data or []
+        )
+        for s in session_rows:
+            sessions_by_profile.setdefault(s["profile_id"], []).append(s)
+    for row in rows:
+        stage = _compute_customer_stage(row, sessions_by_profile.get(row["id"], []))
+        row["stage"] = stage["label"]
+        row["stage_detail"] = stage["detail"]
+        row["stage_code"] = stage["code"]
+
     return {"customers": rows, "count": total_count}
 
 
@@ -198,11 +305,13 @@ async def get_customer(profile_id: str, request: Request) -> dict[str, Any]:
         .order("created_at", desc=True).limit(1).execute().data or []
     )
     sessions = (
-        ctx.supabase.table("doctor_sessions").select("id, status, preferred_time").eq("profile_id", profile_id)
-        .order("created_at", desc=True).limit(10).execute().data or []
+        ctx.supabase.table("doctor_sessions")
+        .select("id,status,doctor_phone,payment_status,awaiting_from,preferred_time,created_at,follow_up_required,follow_up_date")
+        .eq("profile_id", profile_id).order("created_at", desc=True).limit(10).execute().data or []
     )
     pet_ids = [p["id"] for p in pets]
     document_count = len(ctx.supabase.table("documents").select("id").in_("pet_id", pet_ids).execute().data or []) if pet_ids else 0
+    stage = _compute_customer_stage(profile, sessions)
 
     return {
         "profile": profile,
@@ -210,6 +319,9 @@ async def get_customer(profile_id: str, request: Request) -> dict[str, Any]:
         "subscription": subscription_rows[0] if subscription_rows else None,
         "recent_sessions": sessions,
         "document_count": document_count,
+        "stage": stage["label"],
+        "stage_detail": stage["detail"],
+        "stage_code": stage["code"],
     }
 
 

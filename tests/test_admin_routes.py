@@ -71,6 +71,97 @@ async def test_list_customers_search_with_filter_syntax_characters_is_treated_as
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_list_customers_reports_onboarding_incomplete_stage():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {
+                    "id": "c1", "role": "customer", "full_name": "Jane", "phone_number": "919000000001",
+                    "created_at": "2026-01-01", "registration_step": "awaiting_pet_weight",
+                },
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request)
+
+    customer = result["customers"][0]
+    assert customer["stage_code"] == "onboarding"
+    assert "pet's weight" in customer["stage_detail"]
+
+
+@pytest.mark.asyncio
+async def test_list_customers_reports_active_booking_stage():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {
+                    "id": "c1", "role": "customer", "full_name": "Jane", "phone_number": "919000000001",
+                    "created_at": "2026-01-01", "registration_step": "completed",
+                },
+            ],
+            "doctor_sessions": [
+                {
+                    "id": "s1", "profile_id": "c1", "status": "accepted", "payment_status": "awaiting",
+                    "doctor_phone": "919000000099", "preferred_time": "2026-08-01T10:00:00", "created_at": "2026-07-30T00:00:00",
+                },
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request)
+
+    customer = result["customers"][0]
+    assert customer["stage_code"] == "payment"
+    assert "Booked for" in customer["stage_detail"]
+
+
+@pytest.mark.asyncio
+async def test_list_customers_reports_inactive_stage_from_last_active_at():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {
+                    "id": "c1", "role": "customer", "full_name": "Jane", "phone_number": "919000000001",
+                    "created_at": "2026-01-01", "registration_step": "completed",
+                    "last_active_at": "2026-07-01T00:00:00+00:00",
+                },
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request)
+
+    assert result["customers"][0]["stage_code"] == "inactive"
+
+
+def test_compute_customer_stage_new_customer_with_no_activity():
+    stage = admin_routes._compute_customer_stage({"registration_step": "completed"}, [])
+    assert stage["code"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_get_customer_includes_stage():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "Jane", "phone_number": "919000000001", "registration_step": "awaiting_city"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.get_customer("c1", request)
+
+    assert result["stage_code"] == "onboarding"
+    assert "city" in result["stage_detail"]
+
+
+@pytest.mark.asyncio
 async def test_list_customers_includes_each_customers_pets():
     supabase = FakeSupabaseClient(
         initial={
