@@ -33,9 +33,12 @@ async def chat_with_tools(
         tools=tools,
         tool_choice="auto",
         max_completion_tokens=settings.openai_agent_max_tokens,
-        # gpt-5.4/gpt-5.4-mini reject function tools + reasoning_effort together on
+        # Every gpt-5.x variant tested (5.4, 5.5, both full and mini) rejects
+        # function tools + a real reasoning_effort together on
         # /v1/chat/completions ("use /v1/responses or set reasoning_effort to
         # 'none'") — this loop always passes tools, so it's pinned to "none".
+        # Getting real reasoning on tool-calling turns would need migrating
+        # this loop to /v1/responses, which this codebase doesn't use yet.
         reasoning_effort="none",
     )
 
