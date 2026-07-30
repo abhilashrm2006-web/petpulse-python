@@ -113,6 +113,34 @@ async def vision_completion(
     return resp.choices[0].message.content or ""
 
 
+async def multi_image_completion(
+    client: AsyncOpenAI,
+    settings: Settings,
+    system_prompt: str,
+    user_prompt: str,
+    images: list[tuple[str, str]],
+    max_tokens: int = 1600,
+) -> str:
+    """Like vision_completion, but for several images in ONE call so the
+    model can reason about them together (e.g. multiple frames sampled
+    across a video, to catch a motion-based symptom a single still frame
+    can't show) -- free-text output, unlike multi_image_json_completion's
+    strict-JSON extraction use case. `images` is a list of
+    (base64_data, mime_type) pairs."""
+    content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+    for image_base64, mime_type in images:
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}})
+    resp = await client.chat.completions.create(
+        model=settings.openai_reasoning_model,
+        max_completion_tokens=max_tokens,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
+        ],
+    )
+    return resp.choices[0].message.content or ""
+
+
 async def multi_image_json_completion(
     client: AsyncOpenAI,
     settings: Settings,

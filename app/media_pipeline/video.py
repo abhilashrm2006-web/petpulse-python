@@ -8,16 +8,18 @@ import base64
 from openai import AsyncOpenAI
 
 from app.config import Settings
-from app.integrations.media_processing import extract_video_audio, extract_video_frame
-from app.integrations.openai_client import transcribe_speech, vision_completion
+from app.integrations.media_processing import extract_video_audio, extract_video_frames
+from app.integrations.openai_client import multi_image_completion, transcribe_speech
 
 FRAME_SYSTEM_PROMPT = (
-    "You are looking at a single still frame extracted from a video sent by a pet owner or vet. "
-    "Describe what's visible relevant to the pet's health in 2-4 sentences. This is only one frame "
-    "(the very start of the clip) — do not claim to describe motion or the full video, only what's "
-    "visible in this still image. You may be given background on the pet's known chronic "
-    "conditions/allergies — use it only to sharpen your description, never to claim something isn't "
-    "actually visible."
+    "You are looking at several still frames sampled evenly across a video sent by a pet owner or vet, "
+    "in chronological order (first frame = start of the clip, last = end). Describe what's visible relevant "
+    "to the pet's health in 2-5 sentences. Unlike a single photo, you CAN describe motion/change across the "
+    "frames if it's actually visible (e.g. a limp that appears in some frames but not others, labored "
+    "breathing, a head tilt that changes) — but only claim motion/change you can actually see by comparing "
+    "the frames, never invent it. If the frames look essentially identical, say so and describe the static "
+    "pose/scene instead. You may be given background on the pet's known chronic conditions/allergies — use "
+    "it only to sharpen your description, never to claim something isn't actually visible."
 )
 
 
@@ -28,10 +30,10 @@ async def analyze_video(
     caption: str,
     pet_context: str = "",
 ) -> str:
-    frame_bytes = await extract_video_frame(video_bytes)
-    frame_b64 = base64.b64encode(frame_bytes).decode()
-    frame_analysis = await vision_completion(
-        openai_client, settings, FRAME_SYSTEM_PROMPT, f"{pet_context}Caption: {caption or '(none)'}", frame_b64, "image/jpeg"
+    frames = await extract_video_frames(video_bytes)
+    images = [(base64.b64encode(frame).decode(), "image/jpeg") for frame in frames]
+    frame_analysis = await multi_image_completion(
+        openai_client, settings, FRAME_SYSTEM_PROMPT, f"{pet_context}Caption: {caption or '(none)'}", images
     )
 
     audio_bytes = await extract_video_audio(video_bytes)

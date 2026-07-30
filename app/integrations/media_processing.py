@@ -12,17 +12,51 @@ from pathlib import Path
 import fitz  # PyMuPDF
 
 
+MAX_VIDEO_FRAMES = 6
+
+
 def _run_ffmpeg(args: list[str]) -> None:
     subprocess.run(["ffmpeg", "-y", *args], check=True, capture_output=True)
 
 
-def _extract_video_frame_sync(video_bytes: bytes) -> bytes:
+def _video_duration_seconds(video_path: Path) -> float:
+    # Broad except (not just ValueError on a bad parse) -- ffprobe ships in
+    # the same apt/homebrew package as ffmpeg so it should always be present,
+    # but a crashed/unavailable probe must degrade to the fixed-rate fallback
+    # below, not take down the whole video-analysis turn.
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(video_path)],
+            capture_output=True, text=True,
+        )
+        return float(result.stdout.strip())
+    except (OSError, ValueError):
+        return 0.0  # duration unknown -- caller falls back to a fixed sample rate
+
+
+def _extract_video_frames_sync(video_bytes: bytes, max_frames: int = MAX_VIDEO_FRAMES) -> list[bytes]:
+    """A single frame from the very start of a clip can't show a
+    motion-based symptom (limping, a head tilt that comes and goes, labored
+    breathing) -- sample up to max_frames frames spread evenly across the
+    WHOLE clip instead. fps is derived from the actual duration (not a fixed
+    rate) so a 3s clip and a 30s clip both get frames spanning their full
+    length rather than all clustered in the first few seconds; unknown/zero
+    duration falls back to a fixed 1fps, which max_frames still caps."""
     with tempfile.TemporaryDirectory() as tmp:
         video_path = Path(tmp) / "input.mp4"
-        frame_path = Path(tmp) / "frame.jpg"
         video_path.write_bytes(video_bytes)
-        _run_ffmpeg(["-i", str(video_path), "-vframes", "1", "-f", "image2", str(frame_path)])
-        return frame_path.read_bytes()
+        duration = _video_duration_seconds(video_path)
+        fps = max_frames / duration if duration > 0 else 1.0
+        pattern = Path(tmp) / "frame_%02d.jpg"
+        _run_ffmpeg(["-i", str(video_path), "-vf", f"fps={fps}", "-frames:v", str(max_frames), "-f", "image2", str(pattern)])
+        frame_paths = sorted(Path(tmp).glob("frame_*.jpg"))
+        if not frame_paths:
+            # Extremely short/unusual clip where the fps filter yielded
+            # nothing -- fall back to one frame rather than returning empty.
+            single_path = Path(tmp) / "frame_fallback.jpg"
+            _run_ffmpeg(["-i", str(video_path), "-vframes", "1", "-f", "image2", str(single_path)])
+            return [single_path.read_bytes()]
+        return [p.read_bytes() for p in frame_paths]
 
 
 def _extract_video_audio_sync(video_bytes: bytes) -> bytes | None:
@@ -58,8 +92,8 @@ def _render_pdf_first_page_sync(pdf_bytes: bytes) -> bytes:
         doc.close()
 
 
-async def extract_video_frame(video_bytes: bytes) -> bytes:
-    return await asyncio.to_thread(_extract_video_frame_sync, video_bytes)
+async def extract_video_frames(video_bytes: bytes, max_frames: int = MAX_VIDEO_FRAMES) -> list[bytes]:
+    return await asyncio.to_thread(_extract_video_frames_sync, video_bytes, max_frames)
 
 
 async def extract_video_audio(video_bytes: bytes) -> bytes | None:
