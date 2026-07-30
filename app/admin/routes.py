@@ -158,13 +158,34 @@ def _compute_customer_stage(
             "detail": f"Stuck at {REGISTRATION_STEP_LABELS.get(step, step)}",
         }
 
-    active = sorted(
-        (s for s in sessions if s.get("status") in ACTIVE_SESSION_STATUSES),
-        key=lambda s: s.get("created_at") or "",
-        reverse=True,
-    )
+    active = [s for s in sessions if s.get("status") in ACTIVE_SESSION_STATUSES]
     if active:
-        s = active[0]
+        # A customer can have more than one concurrent active session -- booking
+        # is scoped per-pet (see request_doctor_session in app/agent/tools/booking.py),
+        # so a multi-pet account can easily have one pet mid-payment and another
+        # just starting to pick a vet at the same time. Picking whichever session
+        # was merely created most recently (the old behavior) surfaces the
+        # newer-but-less-urgent one and buries a stalled payment/prescription
+        # behind it -- rank by actionability first (payment blocked > prescription
+        # owed > negotiating > booking > already-confirmed-upcoming) and only
+        # fall back to recency to break ties within the same rank.
+        def _active_priority(sess: dict[str, Any]) -> int:
+            if sess["status"] == "accepted":
+                if sess.get("payment_status") == "awaiting":
+                    return 0
+                if sess.get("awaiting_from") == "doctor_prescription":
+                    return 1
+                return 4  # upcoming, already confirmed -- least urgent of the active states
+            if sess["status"] == "negotiating":
+                return 2
+            return 3  # pending (booking)
+
+        # Sort newest-first, then pick the lowest-priority-number session via a
+        # stable min() -- ties within the same priority tier naturally resolve
+        # to whichever was created most recently, since that's earliest in this
+        # pre-sorted iteration order.
+        active_by_recency = sorted(active, key=lambda sess: sess.get("created_at") or "", reverse=True)
+        s = min(active_by_recency, key=_active_priority)
         if s["status"] == "pending":
             if s.get("doctor_phone") == "pending_doctor_choice":
                 return {"code": "booking", "label": "Choosing a vet", "detail": "Picking a doctor from the list"}

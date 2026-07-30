@@ -144,6 +144,51 @@ def test_compute_customer_stage_new_customer_with_no_activity():
     assert stage["code"] == "new"
 
 
+def test_compute_customer_stage_prioritizes_payment_over_a_more_recently_created_booking():
+    """Regression: booking is scoped per-pet (see request_doctor_session), so a
+    multi-pet account can have one pet mid-payment and another pet just starting
+    to pick a vet at the same time. The stage used to be picked purely by which
+    session was created most recently, which could bury an older, stalled
+    payment behind a brand-new "choosing a vet" session for a different pet --
+    exactly backwards for an admin trying to see who needs following up with."""
+    profile = {"registration_step": "completed"}
+    sessions = [
+        # Older session (pet A): payment blocked -- the more actionable one.
+        {
+            "status": "accepted", "payment_status": "awaiting", "doctor_phone": "919000000099",
+            "preferred_time": "2026-08-01T10:00:00", "created_at": "2026-07-20T00:00:00",
+        },
+        # Newer session (pet B): just started, far less urgent.
+        {"status": "pending", "doctor_phone": "pending_doctor_choice", "created_at": "2026-07-29T00:00:00"},
+    ]
+
+    stage = admin_routes._compute_customer_stage(profile, sessions)
+
+    assert stage["code"] == "payment"
+
+
+def test_compute_customer_stage_breaks_priority_ties_by_recency():
+    """Two sessions at the same priority tier (e.g. both awaiting payment, for
+    two different pets) should still fall back to picking the more recently
+    created one, matching the old tie-break behavior."""
+    profile = {"registration_step": "completed"}
+    sessions = [
+        {
+            "status": "accepted", "payment_status": "awaiting", "doctor_phone": "919000000099",
+            "preferred_time": "2026-08-01T10:00:00", "created_at": "2026-07-20T00:00:00",
+        },
+        {
+            "status": "accepted", "payment_status": "awaiting", "doctor_phone": "919000000098",
+            "preferred_time": "2026-08-02T10:00:00", "created_at": "2026-07-29T00:00:00",
+        },
+    ]
+
+    stage = admin_routes._compute_customer_stage(profile, sessions)
+
+    assert stage["code"] == "payment"
+    assert "2026-08-02T10:00:00" in stage["detail"]
+
+
 @pytest.mark.asyncio
 async def test_get_customer_includes_stage():
     supabase = FakeSupabaseClient(
