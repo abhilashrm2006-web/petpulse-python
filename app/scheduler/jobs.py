@@ -9,6 +9,7 @@ import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 
+from app.admin.intent_rating import rate_customer_intent
 from app.availability.slots import IST
 from app.deps import AppContext
 from app.integrations import google_drive
@@ -28,6 +29,11 @@ ONBOARDING_REMINDER_COOLDOWN = timedelta(days=1)
 # thousands of customers), but hammering Supabase with all of them at once
 # isn't safe either; a bounded batch is the middle ground.
 REENGAGEMENT_LOOKUP_CONCURRENCY = 20
+# Unlike every other job in this file, each candidate here costs a real
+# OpenAI call, not just DB writes -- capped per run to bound API cost/
+# latency, not for correctness (a customer not reached this run is picked
+# up again next run, same as any other "top N stale rows" job).
+INTENT_RATING_BATCH_SIZE = 20
 
 _COUNTDOWN_PHRASES = {3: "is due in 3 days", 2: "is due in 2 days", 1: "is due tomorrow", 0: "is due today"}
 
@@ -566,3 +572,59 @@ async def send_doctor_schedule_reminders(ctx: AppContext, reminder_type: str) ->
             client.table("doctor_schedule_reminders_sent").delete().eq("doctor_phone", doctor_phone).eq(
                 "reminder_type", reminder_type
             ).eq("reminder_date", target_date.isoformat()).execute()
+
+
+async def rate_customer_intents(ctx: AppContext) -> None:
+    """Periodically LLM-rates each customer's purchase/engagement intent
+    (High/Medium/Low) from their chat history, so the admin Customers page
+    can filter by intent without every admin manually clicking "rate" on
+    each profile. A customer is a candidate if they've never been rated, or
+    have more messages now than when they were last rated (rating is stale).
+    Capped at INTENT_RATING_BATCH_SIZE per run.
+
+    Fetches every candidate's messages in one batched query rather than one
+    query per profile -- fine at today's scale (tens to low hundreds of
+    customers); would need a different approach (e.g. a per-profile
+    message-count column touched incrementally, like profiles.last_active_at)
+    if the customer base grows into the thousands."""
+    client = ctx.supabase
+    profiles = (
+        client.table("profiles").select("id,intent_rating_message_count").eq("role", "customer").execute().data or []
+    )
+    if not profiles:
+        return
+
+    profile_ids = [p["id"] for p in profiles]
+    message_rows = (
+        client.table("messages").select("profile_id,sender_type,content,created_at")
+        .in_("profile_id", profile_ids).order("created_at").execute().data or []
+    )
+    messages_by_profile: dict[str, list[dict]] = {}
+    for m in message_rows:
+        messages_by_profile.setdefault(m["profile_id"], []).append(m)
+
+    candidates = []
+    for p in profiles:
+        msgs = messages_by_profile.get(p["id"], [])
+        if not msgs:
+            continue  # nothing to rate yet
+        already_rated_count = p.get("intent_rating_message_count")
+        if already_rated_count is not None and len(msgs) <= already_rated_count:
+            continue  # rated already, no new messages since
+        candidates.append((p["id"], msgs))
+    candidates = candidates[:INTENT_RATING_BATCH_SIZE]
+
+    for profile_id, msgs in candidates:
+        try:
+            result = await rate_customer_intent(ctx.openai, ctx.settings, msgs)
+        except Exception:
+            logger.exception("Failed to rate intent for profile=%s", profile_id)
+            continue
+        client.table("profiles").update(
+            {
+                "intent_rating": result["rating"],
+                "intent_rating_reason": result["reason"],
+                "intent_rating_updated_at": datetime.now(tz=timezone.utc).isoformat(),
+                "intent_rating_message_count": len(msgs),
+            }
+        ).eq("id", profile_id).execute()

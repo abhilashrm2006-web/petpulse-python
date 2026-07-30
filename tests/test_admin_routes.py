@@ -17,7 +17,7 @@ def _make_ctx(supabase):
     settings = SimpleNamespace(
         razorpay_key_id="x", razorpay_key_secret="y",
     )
-    return SimpleNamespace(supabase=supabase, whatsapp=whatsapp, settings=settings)
+    return SimpleNamespace(supabase=supabase, whatsapp=whatsapp, settings=settings, openai=SimpleNamespace())
 
 
 def _fake_request(ctx):
@@ -336,6 +336,63 @@ async def test_list_customers_filters_by_stage():
 
     assert result["count"] == 1
     assert result["customers"][0]["full_name"] == "Stuck"
+
+
+@pytest.mark.asyncio
+async def test_list_customers_filters_by_intent():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "Hot", "phone_number": "919000000001", "created_at": "2026-01-01", "intent_rating": "High"},
+                {"id": "c2", "role": "customer", "full_name": "Cold", "phone_number": "919000000002", "created_at": "2026-01-02", "intent_rating": "Low"},
+                {"id": "c3", "role": "customer", "full_name": "Unrated", "phone_number": "919000000003", "created_at": "2026-01-03"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    high = await admin_routes.list_customers(request, intent="High")
+    assert high["count"] == 1
+    assert high["customers"][0]["full_name"] == "Hot"
+
+    unrated = await admin_routes.list_customers(request, intent="unrated")
+    assert unrated["count"] == 1
+    assert unrated["customers"][0]["full_name"] == "Unrated"
+
+
+@pytest.mark.asyncio
+async def test_rate_customer_intent_endpoint_stores_result():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [{"id": "c1", "role": "customer", "full_name": "Jane", "phone_number": "919000000001"}],
+            "messages": [
+                {"id": "m1", "profile_id": "c1", "sender_type": "user", "content": "I want to book a vet now", "created_at": "2026-06-01T10:00:00"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    with patch.object(
+        admin_routes, "rate_customer_intent",
+        AsyncMock(return_value={"rating": "High", "reason": "Asked to book a vet."}),
+    ):
+        result = await admin_routes.rate_customer_intent_endpoint("c1", request)
+
+    assert result["success"] is True
+    assert result["profile"]["intent_rating"] == "High"
+    assert result["profile"]["intent_rating_reason"] == "Asked to book a vet."
+    assert result["profile"]["intent_rating_message_count"] == 1
+    assert supabase.rows("profiles")[0]["intent_rating"] == "High"
+
+
+@pytest.mark.asyncio
+async def test_rate_customer_intent_endpoint_404s_for_unknown_customer():
+    supabase = FakeSupabaseClient()
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.rate_customer_intent_endpoint("nope", request)
+    assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio

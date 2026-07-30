@@ -7,6 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.deps import AppContext
 from app.scheduler.jobs import (
+    rate_customer_intents,
     retain_chat_history,
     send_doctor_schedule_reminders,
     send_new_parent_followups,
@@ -34,6 +35,10 @@ def start_scheduler(ctx: AppContext) -> AsyncIOScheduler:
     # No-op until google_service_account_json/doctor_drive_folder_id are set
     # (see sync_doctor_onboarding_drafts) -- safe to always register.
     scheduler.add_job(sync_doctor_onboarding_drafts, CronTrigger(hour="*/6", minute=30), args=[ctx], id="doctor_drive_sync")
+    # Every 6 hours, staggered from the other */6h jobs above -- each
+    # candidate here costs a real OpenAI call (see INTENT_RATING_BATCH_SIZE),
+    # so this doesn't need reengagement's finer time-threshold reasoning.
+    scheduler.add_job(rate_customer_intents, CronTrigger(hour="*/6", minute=50), args=[ctx], id="rate_customer_intents")
     # T-1 (evening before) and T-0 (morning of) doctor appointment-schedule
     # pushes -- two separate triggers calling the same function with a
     # different reminder_type, since "day before" and "day of" naturally

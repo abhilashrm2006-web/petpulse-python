@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
+from app.admin.intent_rating import rate_customer_intent
 from app.agent.tools.booking import cancel_session
 from app.deps import AppContext
 from app.integrations import razorpay_client
@@ -206,6 +207,7 @@ async def list_customers(
     breed: str = "",
     status: str = "",
     stage: str = "",
+    intent: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -216,6 +218,11 @@ async def list_customers(
         query = query.or_(f"full_name.ilike.{pattern},phone_number.ilike.{pattern},email.ilike.{pattern}")
     if status:
         query = query.eq("is_active", status.lower() == "active")
+    if intent:
+        # A real column (unlike stage, which is computed), so filterable
+        # directly at the DB level -- "unrated" means the background job
+        # hasn't gotten to them yet or they have no messages at all.
+        query = query.is_("intent_rating", "null") if intent.lower() == "unrated" else query.eq("intent_rating", intent)
     if date_from:
         query = query.gte("created_at", date_from)
     if date_to:
@@ -347,6 +354,38 @@ async def get_customer(profile_id: str, request: Request) -> dict[str, Any]:
         "stage_detail": stage["detail"],
         "stage_code": stage["code"],
     }
+
+
+@router.post("/customers/{profile_id}/rate-intent")
+async def rate_customer_intent_endpoint(profile_id: str, request: Request) -> dict[str, Any]:
+    """On-demand version of the same LLM classification the
+    rate_customer_intents scheduled job runs in bulk -- lets an admin force
+    a fresh rating for one customer right after a new conversation, rather
+    than waiting for the next scheduled pass."""
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("profiles").select("id").eq("id", profile_id).eq("role", "customer").limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    messages = (
+        ctx.supabase.table("messages").select("sender_type,content").eq("profile_id", profile_id)
+        .order("created_at", desc=True).limit(RECENT_ACTIVITY_LIMIT).execute().data or []
+    )
+    messages.reverse()
+    result = await rate_customer_intent(ctx.openai, ctx.settings, messages)
+    updated = (
+        ctx.supabase.table("profiles")
+        .update(
+            {
+                "intent_rating": result["rating"],
+                "intent_rating_reason": result["reason"],
+                "intent_rating_updated_at": datetime.now(timezone.utc).isoformat(),
+                "intent_rating_message_count": len(messages),
+            }
+        )
+        .eq("id", profile_id).execute().data[0]
+    )
+    return {"success": True, "profile": updated}
 
 
 @router.post("/customers/{profile_id}/activate")
