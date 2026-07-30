@@ -21,6 +21,8 @@ DOCTOR_DRIVE_SYNC_MIME_ALLOWLIST = {"application/pdf", "image/jpeg", "image/png"
 
 REENGAGEMENT_SILENCE_THRESHOLD = timedelta(hours=48)
 REENGAGEMENT_COOLDOWN = timedelta(days=7)
+ONBOARDING_STUCK_THRESHOLD = timedelta(hours=24)
+ONBOARDING_REMINDER_COOLDOWN = timedelta(days=1)
 # How many profiles' "last active" lookup to run concurrently -- one query per
 # customer would take far too long run one-at-a-time at real scale (tens of
 # thousands of customers), but hammering Supabase with all of them at once
@@ -321,6 +323,70 @@ async def send_reengagement_nudges(ctx: AppContext) -> None:
             client.table("profiles").update({"last_reengagement_sent_at": profile.get("last_reengagement_sent_at")}).eq("id", profile["id"]).execute()
 
     await asyncio.gather(*(_check_and_nudge(p) for p in candidates))
+
+
+def _onboarding_reminder_text(profile: dict) -> str:
+    name = profile.get("full_name")
+    greeting = f"Hey {name.split()[0]}!" if name else "Hey there!"
+    return (
+        f"{greeting} Looks like you didn't quite finish setting up your pet's profile with us. "
+        "Just reply here whenever you're ready and we'll pick up right where you left off — "
+        "only takes a couple of minutes 🐾"
+    )
+
+
+async def send_onboarding_reminders(ctx: AppContext) -> None:
+    """A customer who started the signup flow (registration_step is set,
+    e.g. by app.ingestion.registration) but has gone quiet mid-flow for
+    ONBOARDING_STUCK_THRESHOLD (24h) gets one nudge to come back and finish,
+    then at most one more every ONBOARDING_REMINDER_COOLDOWN (1 day) if
+    they're still stuck -- same claim-before-send shape as
+    send_reengagement_nudges, but gated on "mid-signup", not "already
+    onboarded and gone silent". Unlike that job, a null last_active_at here
+    is NOT "never engaged" (they had to message at least once to get a
+    registration_step at all) -- it just means they started before
+    profiles.last_active_at existed, so they're treated as stuck too."""
+    client = ctx.supabase
+    now = datetime.now(tz=timezone.utc)
+    stuck_cutoff = now - ONBOARDING_STUCK_THRESHOLD
+    cooldown_cutoff = now - ONBOARDING_REMINDER_COOLDOWN
+
+    profiles = client.table("profiles").select("*").eq("role", "customer").execute().data or []
+    candidates = [
+        p for p in profiles
+        if p.get("registration_step") and p["registration_step"] != "completed"
+        and (not p.get("last_active_at") or p["last_active_at"] < stuck_cutoff.isoformat())
+        and (not p.get("last_onboarding_reminder_sent_at") or p["last_onboarding_reminder_sent_at"] < cooldown_cutoff.isoformat())
+    ]
+
+    async def _remind(profile: dict) -> None:
+        # Atomic claim BEFORE sending, same idempotency reasoning as every
+        # other job here -- prevents a double-nudge if this ever runs on
+        # more than one worker/replica.
+        claimed = (
+            client.table("profiles")
+            .update({"last_onboarding_reminder_sent_at": now.isoformat()})
+            .eq("id", profile["id"])
+            .or_(f"last_onboarding_reminder_sent_at.is.null,last_onboarding_reminder_sent_at.lt.{cooldown_cutoff.isoformat()}")
+            .execute()
+            .data
+        )
+        if not claimed:
+            return
+        phone = profile.get("phone_number")
+        if not phone:
+            return
+        try:
+            await ctx.whatsapp.send_text(phone, _onboarding_reminder_text(profile))
+        except Exception:
+            logger.exception("Failed to send onboarding reminder to %s", phone)
+            # Revert the claim so a transient send failure doesn't silently
+            # block this customer from ever being reminded again.
+            client.table("profiles").update(
+                {"last_onboarding_reminder_sent_at": profile.get("last_onboarding_reminder_sent_at")}
+            ).eq("id", profile["id"]).execute()
+
+    await asyncio.gather(*(_remind(p) for p in candidates))
 
 
 def _folder_signature(files: list[dict]) -> str:
