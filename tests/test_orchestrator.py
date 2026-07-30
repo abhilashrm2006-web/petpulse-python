@@ -110,6 +110,60 @@ async def test_agent_calls_the_tool_the_model_picks_then_stops(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_identical_repeated_tool_call_breaks_the_loop_with_a_fallback(monkeypatch):
+    """If the model re-issues the exact same tool call (same name, same
+    args) it already got a result for last iteration, it isn't registering
+    the prior result -- left to run to openai_agent_max_iterations, it would
+    burn iterations repeating itself and, worse, could re-run a
+    side-effecting tool (booking, payment) more than once. Must stop early
+    with a graceful fallback instead."""
+    call_count = 0
+
+    async def fake_tool(ctx, agent_ctx, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return {"success": True, "severity": 4}
+
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [{"type": "function", "function": {"name": "check_symptoms"}}])
+    monkeypatch.setattr(orchestrator, "get_tool_fn", lambda name: fake_tool)
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+
+    # The model calls the SAME tool with the SAME args on every iteration --
+    # simulates it not registering the tool result each time.
+    same_call = _fake_tool_call("call-1", "check_symptoms", {"symptoms": "vomiting"})
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return _fake_response(None, [same_call])
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings,
+        http=None,
+        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
+        supabase=_make_supabase_mock(),
+        openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx()
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.1",
+        timestamp="1700000000", message_type="text", text="Rex has been vomiting",
+    )
+
+    result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    # The tool actually ran once (first iteration); the repeat on iteration 2
+    # was caught BEFORE re-running it, so the loop stopped well short of
+    # max_iterations (10) and never called the tool a second time.
+    assert call_count == 1
+    assert "trouble" in result.lower() or "rephrasing" in result.lower()
+
+
+@pytest.mark.asyncio
 async def test_self_messaging_tool_suppresses_final_text(monkeypatch):
     async def fake_tool(ctx, agent_ctx, **kwargs):
         return {"success": True, "mode": "doctor_catalogue_sent", "session_id": "s1"}

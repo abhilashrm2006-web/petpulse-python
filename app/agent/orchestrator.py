@@ -135,6 +135,7 @@ async def run_agent_turn(
 
     self_messaged = False
     final_text = ""
+    previous_call_signatures: frozenset[tuple[str, str]] | None = None
 
     for _ in range(ctx.settings.openai_agent_max_iterations):
         response = await chat_with_tools(ctx.openai, ctx.settings, messages, tools)
@@ -144,15 +145,29 @@ async def run_agent_turn(
             final_text = message.content or ""
             break
 
-        messages.append(_tool_call_to_message_dict(message))
-
+        parsed_calls: list[tuple[Any, str, dict[str, Any]]] = []
         for tool_call in message.tool_calls:
-            name = tool_call.function.name
             try:
                 args = json.loads(tool_call.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
+            parsed_calls.append((tool_call, tool_call.function.name, args))
 
+        # If the model re-issues the exact same tool call(s) it already got a
+        # result for last iteration, it isn't registering the prior result --
+        # left alone it would burn iterations repeating itself (and, worse,
+        # re-run side-effecting tools like booking/payment actions). Stop
+        # here with a graceful fallback instead.
+        call_signatures = frozenset((name, json.dumps(args, sort_keys=True)) for _, name, args in parsed_calls)
+        if previous_call_signatures is not None and call_signatures == previous_call_signatures:
+            logger.warning("Agent repeated identical tool call(s) for phone=%s, breaking loop", phone)
+            final_text = "Sorry, I'm having a bit of trouble with that — could you try rephrasing, or let me know if you'd like to try again?"
+            break
+        previous_call_signatures = call_signatures
+
+        messages.append(_tool_call_to_message_dict(message))
+
+        for tool_call, name, args in parsed_calls:
             if not is_tool_allowed_for_role(name, role):
                 result: dict[str, Any] = {"success": False, "error": "tool_not_available_for_role"}
             elif not is_tool_allowed_for_tier(name, role, agent_ctx.is_subscriber):
