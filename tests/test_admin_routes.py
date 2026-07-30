@@ -1307,3 +1307,32 @@ async def test_delete_platform_cost():
 
     assert result["success"] is True
     assert supabase.rows("platform_costs") == []
+
+
+@pytest.mark.asyncio
+async def test_analytics_pnl_computes_revenue_and_costs():
+    supabase = FakeSupabaseClient(
+        initial={
+            "subscriptions": [
+                {"id": "s1", "amount": 399, "status": "active", "created_at": "2026-06-05"},
+                {"id": "s2", "amount": 99, "status": "active", "created_at": "2026-06-10"},
+                {"id": "s3", "amount": 399, "status": "cancelled", "created_at": "2020-01-01"},  # outside range, cancelled
+            ],
+            "platform_costs": [
+                {"id": "p1", "platform_name": "OpenAI", "amount_spent": 10, "currency": "USD"},
+                {"id": "p2", "platform_name": "Local Vendor", "amount_spent": 500, "currency": "INR"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.analytics_pnl(request, date_from="2026-06-01", date_to="2026-06-30")
+
+    assert result["revenue_in_range_inr"] == 498
+    assert result["estimated_mrr_inr"] == 498
+    assert {"currency": "INR", "amount": 500} in result["costs_by_currency"]
+    assert {"currency": "USD", "amount": 10} in result["costs_by_currency"]
+    # 10 USD * 83 approx rate + 500 INR = 1330
+    assert result["total_costs_inr_approx"] == 1330.0
+    assert result["net_in_range_inr_approx"] == 498 - 1330.0
+    assert result["fx_rate_used"] == 83.0

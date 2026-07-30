@@ -1221,3 +1221,66 @@ async def delete_platform_cost(platform_id: str, request: Request) -> dict[str, 
     ctx = _ctx(request)
     ctx.supabase.table("platform_costs").delete().eq("id", platform_id).execute()
     return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# P&L -- revenue (subscriptions, booked in INR like the rest of this
+# dashboard) vs. platform costs (platform_costs' running totals, mostly
+# billed in USD). These aren't the same currency, so a single "Net" figure
+# needs a conversion -- USD_TO_INR_APPROX is a fixed indicative rate, not a
+# live FX lookup, and every combined figure is explicitly suffixed
+# "_approx" so nothing here is mistaken for accounting-grade output. The
+# by-currency breakdown is always returned too, so an admin who doesn't
+# trust the approximation can just read the real numbers directly.
+# ---------------------------------------------------------------------------
+
+USD_TO_INR_APPROX = 83.0
+
+
+@router.get("/analytics/pnl")
+async def analytics_pnl(request: Request, date_from: str = "", date_to: str = "") -> dict[str, Any]:
+    ctx = _ctx(request)
+    client = ctx.supabase
+    range_start, range_end = _resolve_range(date_from, date_to)
+    range_end_ts = f"{range_end}T23:59:59"
+
+    # Revenue booked in the selected period -- new subscription amounts
+    # created in-range, same query as analytics_timeseries's revenue series.
+    subs_in_range = (
+        client.table("subscriptions").select("amount")
+        .gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
+    )
+    revenue_in_range_inr = sum(s.get("amount") or 0 for s in subs_in_range)
+
+    # Current recurring run-rate (point-in-time, like estimated_mrr in
+    # analytics_overview) -- a period's "booked revenue" and its "MRR" are
+    # different questions, both useful for a P&L view.
+    active_subs = client.table("subscriptions").select("amount").eq("status", "active").execute().data or []
+    estimated_mrr_inr = sum(s.get("amount") or 0 for s in active_subs)
+
+    # platform_costs.amount_spent is a running total the admin updates from
+    # each platform's own dashboard -- NOT scoped to date_from/date_to (that
+    # table has no period concept), so this compares a period's revenue
+    # against an all-time cost snapshot, not a strict apples-to-apples
+    # period P&L. Labeled as such in the response and the UI.
+    platform_rows = client.table("platform_costs").select("platform_name,amount_spent,currency").execute().data or []
+    costs_by_currency: dict[str, float] = {}
+    for p in platform_rows:
+        cur = p.get("currency") or "USD"
+        costs_by_currency[cur] = costs_by_currency.get(cur, 0) + (p.get("amount_spent") or 0)
+
+    total_costs_inr_approx = sum(
+        (amount * USD_TO_INR_APPROX if cur == "USD" else amount) for cur, amount in costs_by_currency.items()
+    )
+
+    return {
+        "date_from": range_start,
+        "date_to": range_end,
+        "revenue_in_range_inr": revenue_in_range_inr,
+        "estimated_mrr_inr": estimated_mrr_inr,
+        "costs_by_currency": [{"currency": c, "amount": a} for c, a in sorted(costs_by_currency.items())],
+        "total_costs_inr_approx": round(total_costs_inr_approx, 2),
+        "net_in_range_inr_approx": round(revenue_in_range_inr - total_costs_inr_approx, 2),
+        "net_mrr_inr_approx": round(estimated_mrr_inr - total_costs_inr_approx, 2),
+        "fx_rate_used": USD_TO_INR_APPROX,
+    }
