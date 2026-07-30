@@ -38,6 +38,8 @@ class _FakeQuery:
         self._limit: int | None = None
         self._select_args: tuple = ()
         self._on_conflict: str | None = None
+        self._order_col: str | None = None
+        self._order_desc: bool = False
 
     def select(self, *args, **_kwargs):
         self._op = self._op or "select"
@@ -141,7 +143,9 @@ class _FakeQuery:
         self._filters.append((None, "or", conditions))
         return self
 
-    def order(self, *_args, **_kwargs):
+    def order(self, column: str, desc: bool = False, **_kwargs):
+        self._order_col = column
+        self._order_desc = desc
         return self
 
     def limit(self, n):
@@ -263,6 +267,8 @@ class _FakeQuery:
         # update() call on the same underlying row (real PostgREST/Supabase
         # results are independent serialized data, not shared references).
         matched = [dict(row) for row in table if self._matches(row)]
+        if self._order_col is not None:
+            matched.sort(key=lambda row: (row.get(self._order_col) is None, row.get(self._order_col)), reverse=self._order_desc)
         if self._limit is not None:
             matched = matched[: self._limit]
 

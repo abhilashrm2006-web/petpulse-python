@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 ACTIVE_SESSION_STATUSES = ["pending", "negotiating", "accepted"]
+RECENT_ACTIVITY_LIMIT = 60
 
 
 async def _purge_blocking_references(ctx: AppContext, profile_id: str) -> None:
@@ -204,6 +205,7 @@ async def list_customers(
     tier: str = "",
     breed: str = "",
     status: str = "",
+    stage: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -255,27 +257,30 @@ async def list_customers(
         needle = breed.lower()
         rows = [r for r in rows if any(needle in (p.get("breed") or "").lower() for p in r["pets"])]
 
-    total_count = len(rows)
-    rows = rows[offset:offset + limit] if offset else rows[:limit]
-
-    # Stage is computed only for the current page, not the full filtered set --
-    # unlike tier/breed it's not filterable/sortable yet, so there's no reason
-    # to pay for it on rows that pagination is about to discard.
-    page_ids = [r["id"] for r in rows]
+    # Stage is computed for the full filtered set, before pagination -- like
+    # tier/breed, it needs to be filterable, which means it has to exist
+    # before the page slice discards rows.
+    filtered_ids = [r["id"] for r in rows]
     sessions_by_profile: dict[str, list[dict[str, Any]]] = {}
-    if page_ids:
+    if filtered_ids:
         session_rows = (
             ctx.supabase.table("doctor_sessions")
             .select("status,doctor_phone,payment_status,awaiting_from,preferred_time,created_at,follow_up_required,follow_up_date,profile_id")
-            .in_("profile_id", page_ids).execute().data or []
+            .in_("profile_id", filtered_ids).execute().data or []
         )
         for s in session_rows:
             sessions_by_profile.setdefault(s["profile_id"], []).append(s)
     for row in rows:
-        stage = _compute_customer_stage(row, sessions_by_profile.get(row["id"], []))
-        row["stage"] = stage["label"]
-        row["stage_detail"] = stage["detail"]
-        row["stage_code"] = stage["code"]
+        stage_info = _compute_customer_stage(row, sessions_by_profile.get(row["id"], []))
+        row["stage"] = stage_info["label"]
+        row["stage_detail"] = stage_info["detail"]
+        row["stage_code"] = stage_info["code"]
+
+    if stage:
+        rows = [r for r in rows if r["stage_code"] == stage]
+
+    total_count = len(rows)
+    rows = rows[offset:offset + limit] if offset else rows[:limit]
 
     return {"customers": rows, "count": total_count}
 
@@ -313,12 +318,31 @@ async def get_customer(profile_id: str, request: Request) -> dict[str, Any]:
     document_count = len(ctx.supabase.table("documents").select("id").in_("pet_id", pet_ids).execute().data or []) if pet_ids else 0
     stage = _compute_customer_stage(profile, sessions)
 
+    # Full activity picture for an admin trying to understand "what's going
+    # on with this customer" without digging through raw DB tables --
+    # fetched newest-first (cheapest way to cap it at RECENT_ACTIVITY_LIMIT)
+    # then reversed so the transcript reads chronologically, oldest first,
+    # like an actual conversation.
+    recent_messages = (
+        ctx.supabase.table("messages").select("sender_type,content,message_type,created_at")
+        .eq("profile_id", profile_id).order("created_at", desc=True).limit(RECENT_ACTIVITY_LIMIT).execute().data or []
+    )
+    recent_messages.reverse()
+    health_logs = (
+        ctx.supabase.table("health_logs").select("pet_id,ai_risk_score,ai_observation,symptoms,notes,created_at")
+        .eq("profile_id", profile_id).order("created_at", desc=True).limit(RECENT_ACTIVITY_LIMIT).execute().data or []
+    ) if pet_ids else []
+    memory_facts = ctx.supabase.table("memory").select("*").eq("profile_id", profile_id).execute().data or []
+
     return {
         "profile": profile,
         "pets": pets,
         "subscription": subscription_rows[0] if subscription_rows else None,
         "recent_sessions": sessions,
         "document_count": document_count,
+        "recent_messages": recent_messages,
+        "health_logs": health_logs,
+        "memory_facts": memory_facts,
         "stage": stage["label"],
         "stage_detail": stage["detail"],
         "stage_code": stage["code"],

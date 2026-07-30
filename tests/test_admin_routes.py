@@ -162,6 +162,33 @@ async def test_get_customer_includes_stage():
 
 
 @pytest.mark.asyncio
+async def test_get_customer_includes_activity_in_chronological_order():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [{"id": "c1", "role": "customer", "full_name": "Jane", "phone_number": "919000000001"}],
+            "pets": [{"id": "pet1", "profile_id": "c1", "name": "Rex"}],
+            "messages": [
+                {"id": "m1", "profile_id": "c1", "sender_type": "user", "content": "hi", "created_at": "2026-06-01T10:00:00"},
+                {"id": "m2", "profile_id": "c1", "sender_type": "assistant", "content": "hello!", "created_at": "2026-06-01T10:00:05"},
+            ],
+            "health_logs": [
+                {"id": "h1", "profile_id": "c1", "pet_id": "pet1", "ai_risk_score": 40, "symptoms": "limping", "created_at": "2026-06-01T09:00:00"},
+            ],
+            "memory": [
+                {"id": "mem1", "profile_id": "c1", "pet_id": "pet1", "memory_type": "Fact", "pet_name": "Rex", "species": "Dog"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.get_customer("c1", request)
+
+    assert [m["content"] for m in result["recent_messages"]] == ["hi", "hello!"]
+    assert result["health_logs"][0]["symptoms"] == "limping"
+    assert result["memory_facts"][0]["pet_name"] == "Rex"
+
+
+@pytest.mark.asyncio
 async def test_list_customers_includes_each_customers_pets():
     supabase = FakeSupabaseClient(
         initial={
@@ -291,6 +318,46 @@ async def test_list_customers_filters_by_status():
     inactive_only = await admin_routes.list_customers(request, status="inactive")
     assert inactive_only["count"] == 1
     assert inactive_only["customers"][0]["full_name"] == "InactiveCust"
+
+
+@pytest.mark.asyncio
+async def test_list_customers_filters_by_stage():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "full_name": "Stuck", "phone_number": "919000000001", "created_at": "2026-01-01", "registration_step": "awaiting_city"},
+                {"id": "c2", "role": "customer", "full_name": "Done", "phone_number": "919000000002", "created_at": "2026-01-02", "registration_step": "completed"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request, stage="onboarding")
+
+    assert result["count"] == 1
+    assert result["customers"][0]["full_name"] == "Stuck"
+
+
+@pytest.mark.asyncio
+async def test_list_customers_stage_filter_applies_before_pagination():
+    """Regression: stage used to be computed only on the already-paginated
+    page, so filtering by stage against a large customer list could miss
+    matches that got cut by the page slice before stage was even known."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": f"c{i}", "role": "customer", "full_name": f"Done{i}", "phone_number": f"91900000{i:04d}", "created_at": "2026-01-01", "registration_step": "completed"}
+                for i in range(5)
+            ]
+            + [{"id": "stuck", "role": "customer", "full_name": "Stuck", "phone_number": "919999999999", "created_at": "2025-01-01", "registration_step": "awaiting_city"}],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_customers(request, stage="onboarding", limit=3)
+
+    assert result["count"] == 1
+    assert result["customers"][0]["full_name"] == "Stuck"
 
 
 @pytest.mark.asyncio
