@@ -15,19 +15,23 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str = ""
-    # Full gpt-5.5, not the -mini tier -- the "24/7 AI Health Copilot" is meant to
-    # genuinely be a ChatGPT-caliber conversational assistant for pet questions, not
-    # just imitate one on a cheaper/smaller model. Upgraded from gpt-5.4 after a
-    # live A/B (tone/accuracy/verbosity/memory/frustration-handling scenarios,
-    # including a replay of a real customer complaint about repetitive replies)
-    # showed gpt-5.5 consistently more concise and more attentive to what was
-    # already said, under the same reasoning_effort="none" constraint both models
-    # share for tool-calling turns (see chat_with_tools -- gpt-5.x rejects
-    # function tools + a real reasoning_effort together on /v1/chat/completions,
-    # confirmed live for both gpt-5.4 and gpt-5.5; only /v1/responses supports
-    # both together, which this codebase doesn't use).
-    openai_agent_model: str = "gpt-5.5"
-    openai_reasoning_model: str = "gpt-5.5"
+    # Full gpt-5.6-sol, not the -mini tier -- the "24/7 AI Health Copilot" is meant
+    # to genuinely be a ChatGPT-caliber conversational assistant for pet questions,
+    # not just imitate one on a cheaper/smaller model. Path: gpt-5.4 -> gpt-5.5 ->
+    # gpt-5.6-sol, each step decided by a live A/B (tone/accuracy/verbosity/memory/
+    # frustration-handling scenarios, including a replay of a real customer
+    # complaint about repetitive replies, plus a red-flag-emergency safety check).
+    # gpt-5.6-sol won on consistent conciseness and, notably, added a sharper
+    # clinical detail unprompted on the real complaint's scenario than either
+    # gpt-5.5 or its sibling gpt-5.6-terra. Same reasoning_effort="none"
+    # constraint applies to tool-calling turns as every gpt-5.x variant tested
+    # (see chat_with_tools -- rejects function tools + a real reasoning_effort
+    # together on /v1/chat/completions; only /v1/responses supports both
+    # together, which this codebase doesn't use). Worth re-A/B-ing against
+    # gpt-5.6-luna/terra again periodically -- these are close, and newer/less
+    # proven than 5.4/5.5 were.
+    openai_agent_model: str = "gpt-5.6-sol"
+    openai_reasoning_model: str = "gpt-5.6-sol"
     # Voice notes / video audio tracks: gpt-4o-transcribe via the dedicated
     # /v1/audio/transcriptions endpoint, NOT gpt-audio via chat.completions
     # with input_audio (the old approach) -- confirmed live via repeated
