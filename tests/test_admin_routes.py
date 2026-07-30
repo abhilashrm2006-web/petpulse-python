@@ -1024,6 +1024,98 @@ async def test_analytics_timeseries_includes_consultations_series():
     assert result["consultations"] == [{"date": "2026-06-05", "count": 2}]
 
 
+@pytest.mark.asyncio
+async def test_analytics_reports_customer_funnel_counts_by_stage():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "registration_step": "awaiting_pet_name"},
+                {"id": "c2", "role": "customer", "registration_step": "completed"},
+                {"id": "c3", "role": "customer", "registration_step": "completed"},
+            ],
+            "doctor_sessions": [
+                {"id": "s1", "profile_id": "c2", "status": "accepted", "payment_status": "paid", "preferred_time": "2026-08-01T10:00:00", "created_at": "2026-07-01"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.analytics_reports(request)
+
+    by_code = {row["code"]: row["count"] for row in result["customer_funnel"]}
+    assert by_code["onboarding"] == 1
+    assert by_code["upcoming"] == 1
+    assert by_code["new"] == 1
+
+
+@pytest.mark.asyncio
+async def test_analytics_reports_booking_funnel_computes_rates():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "s1", "status": "completed", "created_at": "2026-06-05"},
+                {"id": "s2", "status": "completed", "created_at": "2026-06-06"},
+                {"id": "s3", "status": "declined", "created_at": "2026-06-07"},
+                {"id": "s4", "status": "pending", "created_at": "2026-06-08"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.analytics_reports(request, date_from="2026-06-01", date_to="2026-06-30")
+
+    funnel = result["booking_funnel"]
+    assert funnel["total"] == 4
+    assert funnel["completed_rate"] == 0.5
+    assert funnel["declined_or_cancelled_rate"] == 0.25
+
+
+@pytest.mark.asyncio
+async def test_analytics_reports_revenue_breaks_down_by_plan_and_churn():
+    supabase = FakeSupabaseClient(
+        initial={
+            "subscriptions": [
+                {"id": "s1", "plan_name": "Premium", "amount": 399, "status": "active", "cancelled_at": None},
+                {"id": "s2", "plan_name": "Premium", "amount": 399, "status": "active", "cancelled_at": None},
+                {"id": "s3", "plan_name": "Basic", "amount": 99, "status": "cancelled", "cancelled_at": "2026-06-15T00:00:00"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.analytics_reports(request, date_from="2026-06-01", date_to="2026-06-30")
+
+    revenue = result["revenue"]
+    assert revenue["by_plan"] == [{"plan_name": "Premium", "active_count": 2, "mrr": 798}]
+    assert revenue["churned_in_range"] == 1
+
+
+@pytest.mark.asyncio
+async def test_analytics_reports_doctor_performance_excludes_broadcast_and_placeholder_phones():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "v1", "role": "vet", "full_name": "Dr. Rao", "phone_number": "919000000001"},
+            ],
+            "doctor_sessions": [
+                {"id": "s1", "doctor_phone": "919000000001", "status": "completed"},
+                {"id": "s2", "doctor_phone": "919000000001", "status": "accepted"},
+                {"id": "s3", "doctor_phone": "broadcast", "status": "pending"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.analytics_reports(request)
+
+    assert len(result["doctor_performance"]) == 1
+    doc = result["doctor_performance"][0]
+    assert doc["total_sessions"] == 2
+    assert doc["completed_sessions"] == 1
+    assert doc["completion_rate"] == 0.5
+    assert doc["active_now"] == 1
+
+
 def _appointment_fixture():
     return FakeSupabaseClient(
         initial={

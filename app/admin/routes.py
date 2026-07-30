@@ -1047,3 +1047,135 @@ async def analytics_timeseries(request: Request, date_from: str = "", date_to: s
         "revenue": [{"date": d, "amount": a} for d, a in sorted(revenue_by_day.items())],
         "consultations": [{"date": d, "count": c} for d, c in sorted(consultations_by_day.items())],
     }
+
+
+# Canonical display order for the customer funnel -- roughly the order a
+# customer moves through the journey, not alphabetical/count-sorted, so the
+# funnel reads top-to-bottom the way the business actually flows.
+STAGE_DISPLAY_ORDER = [
+    "onboarding", "new", "booking", "negotiating", "payment",
+    "upcoming", "prescription", "followup", "active", "inactive",
+]
+STAGE_LABELS = {
+    "onboarding": "Onboarding incomplete", "new": "New / no activity yet", "booking": "Choosing/waiting on a vet",
+    "negotiating": "Negotiating appointment time", "payment": "Awaiting payment", "upcoming": "Appointment upcoming",
+    "prescription": "Awaiting prescription", "followup": "Follow-up needed", "active": "Active",
+    "inactive": "Gone quiet",
+}
+
+
+@router.get("/analytics/reports")
+async def analytics_reports(request: Request, date_from: str = "", date_to: str = "") -> dict[str, Any]:
+    """Deeper cross-cutting reports beyond the top-line overview/timeseries:
+    where customers are stuck (funnel), how bookings convert through the
+    session state machine, revenue/churn by plan, and per-doctor throughput.
+    Funnel and doctor-performance are point-in-time (current state, not
+    date-ranged) -- "how many customers are stuck right now" isn't a range
+    concept, matching how total_customers/active_subscribers already work
+    in analytics_overview above."""
+    ctx = _ctx(request)
+    client = ctx.supabase
+    range_start, range_end = _resolve_range(date_from, date_to)
+    range_end_ts = f"{range_end}T23:59:59"
+
+    # --- Customer funnel: current stage of every customer, reusing the same
+    # stage logic as the Customers list/detail pages (see
+    # _compute_customer_stage) so the two views can never disagree.
+    all_customers = client.table("profiles").select("id,registration_step,last_active_at").eq("role", "customer").execute().data or []
+    customer_ids = [c["id"] for c in all_customers]
+    all_sessions_by_profile: dict[str, list[dict[str, Any]]] = {}
+    if customer_ids:
+        session_rows = (
+            client.table("doctor_sessions")
+            .select("status,doctor_phone,payment_status,awaiting_from,preferred_time,created_at,follow_up_required,follow_up_date,profile_id")
+            .in_("profile_id", customer_ids).execute().data or []
+        )
+        for s in session_rows:
+            all_sessions_by_profile.setdefault(s["profile_id"], []).append(s)
+    funnel_counts: dict[str, int] = {code: 0 for code in STAGE_DISPLAY_ORDER}
+    for c in all_customers:
+        stage = _compute_customer_stage(c, all_sessions_by_profile.get(c["id"], []))
+        funnel_counts[stage["code"]] = funnel_counts.get(stage["code"], 0) + 1
+    customer_funnel = [
+        {"code": code, "label": STAGE_LABELS[code], "count": funnel_counts[code]} for code in STAGE_DISPLAY_ORDER
+    ]
+
+    # --- Booking funnel: how sessions created in-range moved through the
+    # state machine (see app/agent/tools/booking.py's docstring for the
+    # full status list).
+    sessions_in_range = (
+        client.table("doctor_sessions").select("status")
+        .gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
+    )
+    booking_total = len(sessions_in_range)
+    booking_by_status: dict[str, int] = {}
+    for s in sessions_in_range:
+        st = s.get("status") or "unknown"
+        booking_by_status[st] = booking_by_status.get(st, 0) + 1
+    completed_n = booking_by_status.get("completed", 0)
+    declined_or_cancelled_n = booking_by_status.get("declined", 0) + booking_by_status.get("cancelled", 0)
+    booking_funnel = {
+        "total": booking_total,
+        "by_status": [{"status": st, "count": n} for st, n in sorted(booking_by_status.items(), key=lambda kv: -kv[1])],
+        "completed_rate": round(completed_n / booking_total, 3) if booking_total else 0,
+        "declined_or_cancelled_rate": round(declined_or_cancelled_n / booking_total, 3) if booking_total else 0,
+    }
+
+    # --- Revenue: current mix by plan (point-in-time, like estimated_mrr in
+    # analytics_overview) plus churn (cancellations) within the date range.
+    all_subs = client.table("subscriptions").select("plan_name,amount,status,cancelled_at").execute().data or []
+    active_subs = [s for s in all_subs if s.get("status") == "active"]
+    revenue_by_plan: dict[str, dict[str, Any]] = {}
+    for s in active_subs:
+        plan = s.get("plan_name") or "Unknown"
+        entry = revenue_by_plan.setdefault(plan, {"plan_name": plan, "active_count": 0, "mrr": 0})
+        entry["active_count"] += 1
+        entry["mrr"] += s.get("amount") or 0
+    status_counts: dict[str, int] = {}
+    for s in all_subs:
+        st = s.get("status") or "unknown"
+        status_counts[st] = status_counts.get(st, 0) + 1
+    churned_in_range = sum(
+        1 for s in all_subs
+        if s.get("status") == "cancelled" and s.get("cancelled_at") and range_start <= s["cancelled_at"][:10] <= range_end
+    )
+    revenue = {
+        "by_plan": sorted(revenue_by_plan.values(), key=lambda r: -r["mrr"]),
+        "by_status": [{"status": st, "count": n} for st, n in sorted(status_counts.items(), key=lambda kv: -kv[1])],
+        "churned_in_range": churned_in_range,
+    }
+
+    # --- Doctor performance: throughput per active vet, all-time (a new
+    # doctor's one session shouldn't show a misleadingly perfect/empty rate
+    # just because the date filter happens to exclude it).
+    doctors = client.table("profiles").select("id,full_name,phone_number").eq("role", "vet").execute().data or []
+    doctor_sessions_all = client.table("doctor_sessions").select("doctor_phone,status").execute().data or []
+    sessions_by_doctor_phone: dict[str, list[dict[str, Any]]] = {}
+    for s in doctor_sessions_all:
+        phone = s.get("doctor_phone")
+        if phone and phone not in ("broadcast", "pending_doctor_choice"):
+            sessions_by_doctor_phone.setdefault(phone, []).append(s)
+    doctor_performance = []
+    for d in doctors:
+        sessions = sessions_by_doctor_phone.get(d["phone_number"], [])
+        total = len(sessions)
+        completed = sum(1 for s in sessions if s.get("status") == "completed")
+        active_now = sum(1 for s in sessions if s.get("status") in ACTIVE_SESSION_STATUSES)
+        doctor_performance.append({
+            "id": d["id"],
+            "full_name": d.get("full_name") or "Unnamed",
+            "total_sessions": total,
+            "completed_sessions": completed,
+            "completion_rate": round(completed / total, 3) if total else 0,
+            "active_now": active_now,
+        })
+    doctor_performance.sort(key=lambda d: -d["total_sessions"])
+
+    return {
+        "date_from": range_start,
+        "date_to": range_end,
+        "customer_funnel": customer_funnel,
+        "booking_funnel": booking_funnel,
+        "revenue": revenue,
+        "doctor_performance": doctor_performance,
+    }
