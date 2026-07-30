@@ -1246,3 +1246,64 @@ async def test_prescription_status_not_completed_is_na():
     result = await admin_routes.list_appointments(request)
 
     assert result["appointments"][0]["prescription_status"] == "N/A"
+
+
+@pytest.mark.asyncio
+async def test_list_platform_costs_returns_sorted_rows():
+    supabase = FakeSupabaseClient(
+        initial={
+            "platform_costs": [
+                {"id": "p2", "platform_name": "Vercel", "amount_spent": 0, "credits_remaining": None, "currency": "USD"},
+                {"id": "p1", "platform_name": "OpenAI", "amount_spent": 42.5, "credits_remaining": 57.5, "currency": "USD"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.list_platform_costs(request)
+
+    assert [p["platform_name"] for p in result["platforms"]] == ["OpenAI", "Vercel"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_platform_cost_creates_new_platform():
+    supabase = FakeSupabaseClient()
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.upsert_platform_cost(
+        "Railway", request, {"amount_spent": 12.34, "credits_remaining": 5, "currency": "USD", "notes": "Hobby plan"}
+    )
+
+    assert result["success"] is True
+    assert result["platform"]["platform_name"] == "Railway"
+    assert result["platform"]["amount_spent"] == 12.34
+    assert result["platform"]["updated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_upsert_platform_cost_updates_existing_platform_in_place():
+    supabase = FakeSupabaseClient(
+        initial={
+            "platform_costs": [{"id": "p1", "platform_name": "Supabase", "amount_spent": 25, "credits_remaining": 0, "currency": "USD"}],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    await admin_routes.upsert_platform_cost("Supabase", request, {"amount_spent": 30})
+
+    rows = supabase.rows("platform_costs")
+    assert len(rows) == 1
+    assert rows[0]["amount_spent"] == 30
+
+
+@pytest.mark.asyncio
+async def test_delete_platform_cost():
+    supabase = FakeSupabaseClient(
+        initial={"platform_costs": [{"id": "p1", "platform_name": "Vercel", "amount_spent": 0, "currency": "USD"}]}
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.delete_platform_cost("p1", request)
+
+    assert result["success"] is True
+    assert supabase.rows("platform_costs") == []

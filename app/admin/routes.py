@@ -1179,3 +1179,45 @@ async def analytics_reports(request: Request, date_from: str = "", date_to: str 
         "revenue": revenue,
         "doctor_performance": doctor_performance,
     }
+
+
+# ---------------------------------------------------------------------------
+# Platform costs -- manual-entry spend/credits tracking per external
+# platform this project runs on (OpenAI, Railway, Supabase, Vercel, ...).
+# None of these expose a usage/billing API we're authenticated against yet
+# (each needs its own separate admin-scoped token), so this is admin-entered
+# from each platform's own dashboard rather than live-fetched -- upsert by
+# platform_name means adding a new platform (e.g. Lovable, Meta/WhatsApp
+# billing, later) needs no code change, just a new row through this same
+# endpoint.
+# ---------------------------------------------------------------------------
+
+@router.get("/platform-costs")
+async def list_platform_costs(request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("platform_costs").select("*").execute().data or []
+    rows.sort(key=lambda r: r["platform_name"])
+    return {"platforms": rows}
+
+
+@router.put("/platform-costs/{platform_name}")
+async def upsert_platform_cost(platform_name: str, request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+    ctx = _ctx(request)
+    fields = {k: v for k, v in payload.items() if k in ("amount_spent", "credits_remaining", "currency", "notes")}
+    row = (
+        ctx.supabase.table("platform_costs")
+        .upsert(
+            {"platform_name": platform_name, **fields, "updated_at": datetime.now(timezone.utc).isoformat()},
+            on_conflict="platform_name",
+        )
+        .execute()
+        .data[0]
+    )
+    return {"success": True, "platform": row}
+
+
+@router.delete("/platform-costs/{platform_id}")
+async def delete_platform_cost(platform_id: str, request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    ctx.supabase.table("platform_costs").delete().eq("id", platform_id).execute()
+    return {"success": True}
