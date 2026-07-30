@@ -189,6 +189,40 @@ async def test_get_customer_includes_activity_in_chronological_order():
 
 
 @pytest.mark.asyncio
+async def test_export_customer_chat_returns_downloadable_transcript():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [{"id": "c1", "role": "customer", "full_name": "Jane Doe", "phone_number": "919000000001"}],
+            "messages": [
+                {"id": "m1", "profile_id": "c1", "sender_type": "user", "content": "hi", "created_at": "2026-06-01T10:00:00"},
+                {"id": "m2", "profile_id": "c1", "sender_type": "assistant", "content": "hello!", "created_at": "2026-06-01T10:00:05"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    response = await admin_routes.export_customer_chat("c1", request)
+
+    body = response.body.decode()
+    assert "Jane Doe" in body
+    assert "919000000001" in body
+    assert "Customer: hi" in body
+    assert "Bot: hello!" in body
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert "919000000001" in response.headers["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_export_customer_chat_404s_for_unknown_customer():
+    supabase = FakeSupabaseClient()
+    request = _fake_request(_make_ctx(supabase))
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_routes.export_customer_chat("nope", request)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_list_customers_includes_each_customers_pets():
     supabase = FakeSupabaseClient(
         initial={

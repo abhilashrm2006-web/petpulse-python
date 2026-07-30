@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 
 from app.admin.intent_rating import rate_customer_intent
 from app.agent.tools.booking import cancel_session
@@ -354,6 +354,45 @@ async def get_customer(profile_id: str, request: Request) -> dict[str, Any]:
         "stage_detail": stage["detail"],
         "stage_code": stage["code"],
     }
+
+
+@router.get("/customers/{profile_id}/export-chat")
+async def export_customer_chat(profile_id: str, request: Request) -> Response:
+    """Full chat history (not capped at RECENT_ACTIVITY_LIMIT like the
+    Activity tab -- an export is explicitly the "give me everything" case)
+    as a plain-text transcript, one line per message, oldest first."""
+    ctx = _ctx(request)
+    rows = ctx.supabase.table("profiles").select("id,full_name,phone_number").eq("id", profile_id).limit(1).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    profile = rows[0]
+
+    messages = (
+        ctx.supabase.table("messages").select("sender_type,content,message_type,created_at")
+        .eq("profile_id", profile_id).order("created_at").execute().data or []
+    )
+
+    sender_labels = {"user": "Customer", "assistant": "Bot", "vet": "Vet"}
+    lines = [
+        f"Chat export -- {profile.get('full_name') or 'Unnamed'} ({profile['phone_number']})",
+        f"Exported {datetime.now(timezone.utc).isoformat()}",
+        f"{len(messages)} messages",
+        "-" * 60,
+        "",
+    ]
+    for m in messages:
+        sender = sender_labels.get(m.get("sender_type"), m.get("sender_type") or "Unknown")
+        content = m.get("content") or f"[{m.get('message_type') or 'non-text'} message, no text content]"
+        lines.append(f"[{m.get('created_at', '')}] {sender}: {content}")
+    text = "\n".join(lines) + "\n"
+
+    safe_phone = "".join(c for c in profile["phone_number"] if c.isalnum()) or profile_id
+    filename = f"chat_export_{safe_phone}.txt"
+    return Response(
+        content=text,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/customers/{profile_id}/rate-intent")
