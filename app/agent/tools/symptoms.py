@@ -127,7 +127,12 @@ async def check_symptoms(
 
     assessment_failed = False
     try:
-        raw = await json_completion(ctx.openai, ctx.settings, TRIAGE_SYSTEM_PROMPT, user_prompt, reasoning_effort="medium")
+        # xhigh, not medium -- this is the single safety-critical judgment
+        # call in the whole system (severity/red-flags/emergency-care
+        # decision). Confirmed live: no meaningful latency difference vs
+        # medium/high for this workload (~6s either way), so there's no
+        # real tradeoff against using the deepest reasoning available.
+        raw = await json_completion(ctx.openai, ctx.settings, TRIAGE_SYSTEM_PROMPT, user_prompt, reasoning_effort="xhigh")
         verdict = json.loads(raw)
         if "severity" not in verdict:
             raise ValueError("missing severity")
