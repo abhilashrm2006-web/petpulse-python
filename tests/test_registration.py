@@ -119,6 +119,32 @@ async def test_customer_name_step_saves_name_and_asks_pet_name():
 
 
 @pytest.mark.asyncio
+async def test_customer_name_step_rejects_junk_and_reprompts():
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    handled = await handle_registration(ctx, _msg(text="Sorry im a veterinarian"))
+
+    assert handled is True
+    profile = supabase.rows("profiles")[0]
+    assert profile["registration_step"] == "awaiting_customer_name"
+    assert profile.get("full_name") != "Sorry im a veterinarian"
+    ctx.whatsapp.send_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pet_name_step_rejects_junk_and_reprompts():
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_pet_name")]})
+    ctx = _make_ctx(supabase)
+
+    handled = await handle_registration(ctx, _msg(text="So many we have 12 dogs"))
+
+    assert handled is True
+    assert supabase.rows("pets") == []
+    assert supabase.rows("profiles")[0]["registration_step"] == "awaiting_pet_name"
+
+
+@pytest.mark.asyncio
 async def test_pet_name_step_creates_pet_and_asks_dob():
     supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_pet_name")]})
     ctx = _make_ctx(supabase)

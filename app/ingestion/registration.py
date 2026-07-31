@@ -52,6 +52,24 @@ def _reply_choice(extracted: ExtractedMessage) -> str:
     return (extracted.text or "").strip().lower()
 
 
+def _looks_like_name(text: str) -> bool:
+    """Real names are short and don't read like a sentence. Confirmed live
+    (2026-07-31): customers who type a complaint/question/off-topic remark at
+    the name/pet-name step ("So many we have 12 dogs", "Sorry im a
+    veterinarian", "No Hindi language?") were being saved verbatim as the
+    name and silently advancing the wizard -- this is a cheap guard against
+    that, not real NLP. False positives (a genuinely long name) just get a
+    one-time re-prompt, not a hard block."""
+    text = text.strip()
+    if not text or len(text) > 40:
+        return False
+    if "?" in text:
+        return False
+    if len(text.split()) > 3:
+        return False
+    return True
+
+
 def _get_active_pet(client, profile_id: str) -> dict[str, Any] | None:
     rows = (
         client.table("pets").select("*").eq("profile_id", profile_id)
@@ -102,8 +120,17 @@ async def handle_registration(ctx: AppContext, extracted: ExtractedMessage) -> b
             .execute()
             .data[0]
         )
-        await ctx.whatsapp.send_text(phone, "Hi this is Pulsy, welcome to PetPulse \U0001F43E")
-        await ctx.whatsapp.send_interactive_buttons(phone, "Are you a new or existing PetPulse member?", MEMBER_TYPE_BUTTONS)
+        await ctx.whatsapp.send_text(
+            phone,
+            "Hi this is Pulsy, welcome to PetPulse \U0001F43E\n"
+            "नमस्ते! मैं Pulsy हूं, PetPulse में आपका स्वागत है \U0001F43E",
+        )
+        await ctx.whatsapp.send_interactive_buttons(
+            phone,
+            "Are you a new or existing PetPulse member?\n"
+            "क्या आप एक नए या मौजूदा सदस्य हैं? नीचे विकल्प चुनें।",
+            MEMBER_TYPE_BUTTONS,
+        )
         return True
 
     step = profile.get("registration_step")
@@ -159,15 +186,20 @@ async def _handle_member_type(ctx: AppContext, profile: dict[str, Any], reply: s
         client.table("profiles").update({"registration_step": "awaiting_existing_phone"}).eq("id", profile["id"]).execute()
         await ctx.whatsapp.send_text(phone, "Please enter the phone number you originally registered with (with country code).")
         return True
-    await ctx.whatsapp.send_interactive_buttons(phone, "Please choose one of the options below.", MEMBER_TYPE_BUTTONS)
+    await ctx.whatsapp.send_interactive_buttons(
+        phone,
+        "Sorry, I didn't understand that -- please tap one of the options below.\n"
+        "माफ़ कीजिए, कृपया नीचे दिए गए विकल्पों में से एक चुनें।",
+        MEMBER_TYPE_BUTTONS,
+    )
     return True
 
 
 async def _handle_customer_name(ctx: AppContext, profile: dict[str, Any], extracted: ExtractedMessage) -> bool:
     phone = profile["phone_number"]
     name = (extracted.text or "").strip()
-    if not name:
-        await ctx.whatsapp.send_text(phone, "Please type your full name.")
+    if not _looks_like_name(name):
+        await ctx.whatsapp.send_text(phone, "Sorry, I didn't quite get that -- please just type your full name (e.g. Priya Sharma).")
         return True
     ctx.supabase.table("profiles").update({"full_name": name, "registration_step": "awaiting_pet_name"}).eq("id", profile["id"]).execute()
     await ctx.whatsapp.send_text(phone, f"Nice to meet you, {name}! What's your pet's name?")
@@ -177,8 +209,8 @@ async def _handle_customer_name(ctx: AppContext, profile: dict[str, Any], extrac
 async def _handle_pet_name(ctx: AppContext, profile: dict[str, Any], extracted: ExtractedMessage) -> bool:
     phone = profile["phone_number"]
     name = (extracted.text or "").strip()
-    if not name:
-        await ctx.whatsapp.send_text(phone, "Please type your pet's name.")
+    if not _looks_like_name(name):
+        await ctx.whatsapp.send_text(phone, "Sorry, I didn't quite get that -- please just type your pet's name (e.g. Bruno).")
         return True
     client = ctx.supabase
     pet = client.table("pets").insert({"profile_id": profile["id"], "name": name, "species": "Other"}).execute().data[0]
@@ -452,7 +484,12 @@ async def _handle_existing_verify(ctx: AppContext, profile: dict[str, Any], extr
 
     client.table("profiles").update({"registration_step": "awaiting_member_type"}).eq("id", profile["id"]).execute()
     await ctx.whatsapp.send_text(phone, "No problem — let's start over.")
-    await ctx.whatsapp.send_interactive_buttons(phone, "Are you a new or existing PetPulse member?", MEMBER_TYPE_BUTTONS)
+    await ctx.whatsapp.send_interactive_buttons(
+        phone,
+        "Are you a new or existing PetPulse member?\n"
+        "क्या आप एक नए या मौजूदा सदस्य हैं? नीचे विकल्प चुनें।",
+        MEMBER_TYPE_BUTTONS,
+    )
     return True
 
 
