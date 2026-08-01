@@ -1093,6 +1093,14 @@ async def analytics_overview(request: Request, date_from: str = "", date_to: str
     total_customers = len(client.table("profiles").select("id").eq("role", "customer").execute().data or [])
     active_subs = client.table("subscriptions").select("amount").eq("status", "active").execute().data or []
     founding_count = len(client.table("profiles").select("id").eq("is_founding_member", True).execute().data or [])
+    # Same 48h window that drives the "Active" customer-stage label
+    # (_compute_customer_stage) -- kept in sync so this stat and the
+    # Customers list agree on what "actively chatting" means.
+    active_chat_cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    active_chatting_customers = len(
+        client.table("profiles").select("id").eq("role", "customer")
+        .gte("last_active_at", active_chat_cutoff).execute().data or []
+    )
 
     new_signups = len(
         client.table("profiles").select("id").eq("role", "customer")
@@ -1119,6 +1127,7 @@ async def analytics_overview(request: Request, date_from: str = "", date_to: str
         "date_from": range_start,
         "date_to": range_end,
         "total_customers": total_customers,
+        "active_chatting_customers": active_chatting_customers,
         "active_subscribers": len(active_subs),
         "founding_members": founding_count,
         "standard_subscribers": len(active_subs) - founding_count,

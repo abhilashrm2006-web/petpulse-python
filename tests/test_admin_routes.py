@@ -975,14 +975,16 @@ async def test_deactivate_doctor_cancels_their_pending_sessions():
 
 @pytest.mark.asyncio
 async def test_analytics_overview_computes_expected_counts():
-    from datetime import date
+    from datetime import date, datetime, timedelta, timezone
 
     today = date.today().isoformat()
+    recently_active = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    stale_active = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
     supabase = FakeSupabaseClient(
         initial={
             "profiles": [
-                {"id": "c1", "role": "customer", "created_at": today},
-                {"id": "c2", "role": "customer", "created_at": "2020-01-01"},
+                {"id": "c1", "role": "customer", "created_at": today, "last_active_at": recently_active},
+                {"id": "c2", "role": "customer", "created_at": "2020-01-01", "last_active_at": stale_active},
                 {"id": "v1", "role": "vet", "created_at": today, "is_founding_member": False},
             ],
             "subscriptions": [
@@ -1004,6 +1006,7 @@ async def test_analytics_overview_computes_expected_counts():
     result = await admin_routes.analytics_overview(request)
 
     assert result["total_customers"] == 2
+    assert result["active_chatting_customers"] == 1
     assert result["active_subscribers"] == 2
     assert result["founding_members"] == 1
     assert result["standard_subscribers"] == 1
