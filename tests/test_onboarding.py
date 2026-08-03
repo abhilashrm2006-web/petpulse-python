@@ -17,11 +17,10 @@ def _make_ctx():
     return SimpleNamespace(supabase=FakeSupabaseClient())
 
 
-def _make_agent_ctx(pets=None, is_subscriber=False):
+def _make_agent_ctx(pets=None):
     return SimpleNamespace(
         profile={"id": "profile-1", "phone_number": "919876543210"},
         pets=pets if pets is not None else [],
-        is_subscriber=is_subscriber,
     )
 
 
@@ -121,25 +120,9 @@ def test_age_rounds_half_up_consistently(spoken, expected):
 
 
 @pytest.mark.asyncio
-async def test_free_tier_customer_blocked_from_adding_a_second_pet():
-    """Multi Pet Management is Subscriber-only -- a Free customer with one
-    pet already on file must be blocked (with an upsell message) from
-    registering a second, not silently allowed."""
+async def test_customer_can_register_their_first_pet():
     ctx = _make_ctx()
-    agent_ctx = _make_agent_ctx(pets=[{"id": "pet-1", "name": "Max"}], is_subscriber=False)
-
-    result = await save_onboarding_field(ctx, agent_ctx, field="pet_name", value="Luna")
-
-    assert result["success"] is False
-    assert result["error"] == "subscriber_only_feature"
-    assert "health timeline" in result["message"]
-    assert ctx.supabase.rows("pets") == []
-
-
-@pytest.mark.asyncio
-async def test_free_tier_customer_can_still_register_their_first_pet():
-    ctx = _make_ctx()
-    agent_ctx = _make_agent_ctx(pets=[], is_subscriber=False)
+    agent_ctx = _make_agent_ctx(pets=[])
 
     result = await save_onboarding_field(ctx, agent_ctx, field="pet_name", value="Max")
 
@@ -148,9 +131,9 @@ async def test_free_tier_customer_can_still_register_their_first_pet():
 
 
 @pytest.mark.asyncio
-async def test_subscriber_can_add_a_second_pet():
+async def test_customer_can_add_a_second_pet():
     ctx = _make_ctx()
-    agent_ctx = _make_agent_ctx(pets=[{"id": "pet-1", "name": "Max"}], is_subscriber=True)
+    agent_ctx = _make_agent_ctx(pets=[{"id": "pet-1", "name": "Max"}])
 
     result = await save_onboarding_field(ctx, agent_ctx, field="pet_name", value="Luna")
 

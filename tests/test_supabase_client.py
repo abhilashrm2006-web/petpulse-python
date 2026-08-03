@@ -57,21 +57,3 @@ def test_attach_owner_info_handles_no_pets():
     assert pets == []
 
 
-def test_is_active_subscriber_true_only_for_status_active():
-    """status="trial" is set the moment someone taps Subscribe, before
-    Razorpay has confirmed payment -- it must NOT grant access on its own,
-    only a webhook-confirmed status="active" row should."""
-    from app.integrations.supabase_client import is_active_subscriber
-
-    client = FakeSupabaseClient(
-        initial={
-            "subscriptions": [
-                {"id": "sub-1", "profile_id": "profile-trial", "status": "trial"},
-                {"id": "sub-2", "profile_id": "profile-active", "status": "active"},
-            ]
-        }
-    )
-
-    assert is_active_subscriber(client, "profile-trial") is False
-    assert is_active_subscriber(client, "profile-active") is True
-    assert is_active_subscriber(client, "profile-unknown") is False

@@ -15,7 +15,7 @@ from tests.fake_supabase import FakeSupabaseClient
 def _make_ctx(supabase):
     whatsapp = SimpleNamespace(send_text=AsyncMock())
     settings = SimpleNamespace(
-        razorpay_key_id="x", razorpay_key_secret="y",
+        razorpay_key_id="x", razorpay_key_secret="y", razorpay_consult_fee_inr=399,
     )
     return SimpleNamespace(supabase=supabase, whatsapp=whatsapp, settings=settings, openai=SimpleNamespace())
 
@@ -985,51 +985,48 @@ async def test_analytics_overview_computes_expected_counts():
             "profiles": [
                 {"id": "c1", "role": "customer", "created_at": today, "last_active_at": recently_active},
                 {"id": "c2", "role": "customer", "created_at": "2020-01-01", "last_active_at": stale_active},
-                {"id": "v1", "role": "vet", "created_at": today, "is_founding_member": False},
-            ],
-            "subscriptions": [
-                {"id": "s1", "status": "active", "amount": 99},
-                {"id": "s2", "status": "active", "amount": 399},
-                {"id": "s3", "status": "cancelled", "amount": 399},
+                {"id": "v1", "role": "vet", "created_at": today},
             ],
             "doctor_sessions": [
-                {"id": "sess1", "status": "completed", "created_at": today},
-                {"id": "sess2", "status": "accepted", "created_at": today},
+                {"id": "sess1", "status": "completed", "payment_status": "paid", "created_at": today},
+                {"id": "sess2", "status": "accepted", "payment_status": "awaiting", "created_at": today},
             ],
             "health_logs": [{"id": "h1", "created_at": today}],
             "documents": [{"id": "d1", "uploaded_at": today}],
         }
     )
-    supabase._store["profiles"][0]["is_founding_member"] = True
     request = _fake_request(_make_ctx(supabase))
 
     result = await admin_routes.analytics_overview(request)
 
     assert result["total_customers"] == 2
     assert result["active_chatting_customers"] == 1
-    assert result["active_subscribers"] == 2
-    assert result["founding_members"] == 1
-    assert result["standard_subscribers"] == 1
-    assert result["estimated_mrr"] == 498
     assert result["new_signups"] == 1
     assert result["completed_consultations"] == 1
     assert result["pending_consultations"] == 1
+    assert result["paid_consultations"] == 1
+    assert result["consultation_revenue"] == 399
     assert result["symptom_checks"] == 1
     assert result["documents_uploaded"] == 1
 
 
 @pytest.mark.asyncio
 async def test_analytics_timeseries_groups_by_day():
+    from datetime import date, timedelta
+
+    day1 = (date.today() - timedelta(days=2)).isoformat()
+    day2 = (date.today() - timedelta(days=1)).isoformat()
     supabase = FakeSupabaseClient(
         initial={
             "profiles": [
-                {"id": "c1", "role": "customer", "created_at": "2026-07-01T10:00:00"},
-                {"id": "c2", "role": "customer", "created_at": "2026-07-01T15:00:00"},
-                {"id": "c3", "role": "customer", "created_at": "2026-07-02T09:00:00"},
+                {"id": "c1", "role": "customer", "created_at": f"{day1}T10:00:00"},
+                {"id": "c2", "role": "customer", "created_at": f"{day1}T15:00:00"},
+                {"id": "c3", "role": "customer", "created_at": f"{day2}T09:00:00"},
             ],
-            "subscriptions": [
-                {"id": "s1", "created_at": "2026-07-01T10:00:00", "amount": 399},
-                {"id": "s2", "created_at": "2026-07-02T09:00:00", "amount": 99},
+            "doctor_sessions": [
+                {"id": "s1", "payment_status": "paid", "created_at": f"{day1}T10:00:00"},
+                {"id": "s2", "payment_status": "paid", "created_at": f"{day2}T09:00:00"},
+                {"id": "s3", "payment_status": "awaiting", "created_at": f"{day2}T09:00:00"},
             ],
         }
     )
@@ -1038,11 +1035,11 @@ async def test_analytics_timeseries_groups_by_day():
     result = await admin_routes.analytics_timeseries(request, days=30)
 
     signups = {row["date"]: row["count"] for row in result["signups"]}
-    assert signups["2026-07-01"] == 2
-    assert signups["2026-07-02"] == 1
+    assert signups[day1] == 2
+    assert signups[day2] == 1
     revenue = {row["date"]: row["amount"] for row in result["revenue"]}
-    assert revenue["2026-07-01"] == 399
-    assert revenue["2026-07-02"] == 99
+    assert revenue[day1] == 399
+    assert revenue[day2] == 399
 
 
 @pytest.mark.asyncio
@@ -1314,13 +1311,13 @@ async def test_analytics_reports_booking_funnel_computes_rates():
 
 
 @pytest.mark.asyncio
-async def test_analytics_reports_revenue_breaks_down_by_plan_and_churn():
+async def test_analytics_reports_revenue_breaks_down_paid_consultations():
     supabase = FakeSupabaseClient(
         initial={
-            "subscriptions": [
-                {"id": "s1", "plan_name": "Premium", "amount": 399, "status": "active", "cancelled_at": None},
-                {"id": "s2", "plan_name": "Premium", "amount": 399, "status": "active", "cancelled_at": None},
-                {"id": "s3", "plan_name": "Basic", "amount": 99, "status": "cancelled", "cancelled_at": "2026-06-15T00:00:00"},
+            "doctor_sessions": [
+                {"id": "s1", "status": "completed", "payment_status": "paid", "created_at": "2026-06-05"},
+                {"id": "s2", "status": "completed", "payment_status": "paid", "created_at": "2026-06-06"},
+                {"id": "s3", "status": "pending", "payment_status": "awaiting", "created_at": "2026-06-07"},
             ],
         }
     )
@@ -1329,8 +1326,11 @@ async def test_analytics_reports_revenue_breaks_down_by_plan_and_churn():
     result = await admin_routes.analytics_reports(request, date_from="2026-06-01", date_to="2026-06-30")
 
     revenue = result["revenue"]
-    assert revenue["by_plan"] == [{"plan_name": "Premium", "active_count": 2, "mrr": 798}]
-    assert revenue["churned_in_range"] == 1
+    assert revenue["paid_consultations"] == 2
+    assert revenue["consultation_revenue_inr"] == 798
+    by_status = {row["status"]: row["count"] for row in revenue["by_payment_status"]}
+    assert by_status["paid"] == 2
+    assert by_status["awaiting"] == 1
 
 
 @pytest.mark.asyncio
@@ -1556,10 +1556,10 @@ async def test_delete_platform_cost():
 async def test_analytics_pnl_computes_revenue_and_costs():
     supabase = FakeSupabaseClient(
         initial={
-            "subscriptions": [
-                {"id": "s1", "amount": 399, "status": "active", "created_at": "2026-06-05"},
-                {"id": "s2", "amount": 99, "status": "active", "created_at": "2026-06-10"},
-                {"id": "s3", "amount": 399, "status": "cancelled", "created_at": "2020-01-01"},  # outside range, cancelled
+            "doctor_sessions": [
+                {"id": "s1", "payment_status": "paid", "created_at": "2026-06-05"},
+                {"id": "s2", "payment_status": "awaiting", "created_at": "2026-06-10"},
+                {"id": "s3", "payment_status": "paid", "created_at": "2020-01-01"},  # outside range
             ],
             "platform_costs": [
                 {"id": "p1", "platform_name": "OpenAI", "amount_spent": 10, "currency": "USD"},
@@ -1571,11 +1571,10 @@ async def test_analytics_pnl_computes_revenue_and_costs():
 
     result = await admin_routes.analytics_pnl(request, date_from="2026-06-01", date_to="2026-06-30")
 
-    assert result["revenue_in_range_inr"] == 498
-    assert result["estimated_mrr_inr"] == 498
+    assert result["revenue_in_range_inr"] == 399
     assert {"currency": "INR", "amount": 500} in result["costs_by_currency"]
     assert {"currency": "USD", "amount": 10} in result["costs_by_currency"]
     # 10 USD * 83 approx rate + 500 INR = 1330
     assert result["total_costs_inr_approx"] == 1330.0
-    assert result["net_in_range_inr_approx"] == 498 - 1330.0
+    assert result["net_in_range_inr_approx"] == 399 - 1330.0
     assert result["fx_rate_used"] == 83.0

@@ -2,7 +2,7 @@ import hashlib
 import hmac
 
 from app.config import Settings
-from app.integrations.razorpay_client import extract_paid_session_id, extract_subscription_event, verify_webhook_signature
+from app.integrations.razorpay_client import extract_paid_session_id, verify_webhook_signature
 
 
 def _settings(secret: str = "whsec_test") -> Settings:
@@ -46,23 +46,3 @@ def test_extract_paid_session_id_handles_malformed_payload():
     assert extract_paid_session_id({}) is None
 
 
-def test_extract_subscription_event_parses_activated_event():
-    body = {
-        "event": "subscription.activated",
-        "payload": {"subscription": {"entity": {"id": "sub_123", "notes": {"reference_id": "profile-a"}}}},
-    }
-    assert extract_subscription_event(body) == ("subscription.activated", "sub_123", "profile-a")
-
-
-def test_extract_subscription_event_ignores_non_subscription_events():
-    assert extract_subscription_event({"event": "payment_link.paid", "payload": {}}) is None
-
-
-def test_extract_subscription_event_handles_malformed_payload():
-    assert extract_subscription_event({"event": "subscription.activated", "payload": {}}) is None
-    assert extract_subscription_event({}) is None
-
-
-def test_extract_subscription_event_tolerates_missing_reference_id():
-    body = {"event": "subscription.charged", "payload": {"subscription": {"entity": {"id": "sub_123", "notes": {}}}}}
-    assert extract_subscription_event(body) == ("subscription.charged", "sub_123", None)

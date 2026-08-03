@@ -96,10 +96,10 @@ async def _cancel_active_subscription(ctx: AppContext, profile_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _subscription_category(profile: dict[str, Any], subscription: dict[str, Any] | None) -> str:
-    """Categorizes a customer for the admin list/filter -- mirrors the same
-    tiers the WhatsApp bot itself gates on (is_active_subscriber,
-    is_founding_member), so "Subscriber" here means the exact same thing
-    it means to the bot, not a separate admin-only notion of status."""
+    """Legacy plan category from before subscriptions were removed as a
+    product concept (every feature except paid doctor consultations is now
+    free for every customer) -- kept only so historical subscription rows
+    still display sensibly; every customer going forward is "Free"."""
     if not subscription:
         return "Free"
     if subscription.get("status") == "active":
@@ -1079,8 +1079,6 @@ async def analytics_overview(request: Request, date_from: str = "", date_to: str
     range_end_ts = f"{range_end}T23:59:59"
 
     total_customers = len(client.table("profiles").select("id").eq("role", "customer").execute().data or [])
-    active_subs = client.table("subscriptions").select("amount").eq("status", "active").execute().data or []
-    founding_count = len(client.table("profiles").select("id").eq("is_founding_member", True).execute().data or [])
     # Same 48h window that drives the "Active" customer-stage label
     # (_compute_customer_stage) -- kept in sync so this stat and the
     # Customers list agree on what "actively chatting" means.
@@ -1098,12 +1096,14 @@ async def analytics_overview(request: Request, date_from: str = "", date_to: str
     # to count status=='accepted' (upcoming/confirmed, not actually done),
     # which under-reported nothing but mislabeled what it was counting.
     sessions_in_range = (
-        client.table("doctor_sessions").select("id, status")
+        client.table("doctor_sessions").select("id, status, payment_status")
         .gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
     )
     completed_consultations = sum(1 for s in sessions_in_range if s.get("status") == "completed")
     pending_consultations = sum(1 for s in sessions_in_range if s.get("status") in ("pending", "negotiating", "accepted"))
     cancelled_consultations = sum(1 for s in sessions_in_range if s.get("status") in ("declined", "cancelled"))
+    paid_consultations = sum(1 for s in sessions_in_range if s.get("payment_status") == "paid")
+    consultation_revenue = paid_consultations * ctx.settings.razorpay_consult_fee_inr
     symptom_checks = len(
         client.table("health_logs").select("id").gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
     )
@@ -1116,14 +1116,12 @@ async def analytics_overview(request: Request, date_from: str = "", date_to: str
         "date_to": range_end,
         "total_customers": total_customers,
         "active_chatting_customers": active_chatting_customers,
-        "active_subscribers": len(active_subs),
-        "founding_members": founding_count,
-        "standard_subscribers": len(active_subs) - founding_count,
-        "estimated_mrr": sum(s.get("amount") or 0 for s in active_subs),
         "new_signups": new_signups,
         "completed_consultations": completed_consultations,
         "pending_consultations": pending_consultations,
         "cancelled_consultations": cancelled_consultations,
+        "paid_consultations": paid_consultations,
+        "consultation_revenue": consultation_revenue,
         "symptom_checks": symptom_checks,
         "documents_uploaded": documents_uploaded,
     }
@@ -1144,9 +1142,9 @@ async def analytics_timeseries(request: Request, date_from: str = "", date_to: s
         client.table("profiles").select("created_at").eq("role", "customer")
         .gte("created_at", since).lte("created_at", until_ts).execute().data or []
     )
-    subscriptions = (
-        client.table("subscriptions").select("created_at, amount")
-        .gte("created_at", since).lte("created_at", until_ts).execute().data or []
+    paid_sessions = (
+        client.table("doctor_sessions").select("created_at")
+        .eq("payment_status", "paid").gte("created_at", since).lte("created_at", until_ts).execute().data or []
     )
     # Grouped by created_at (booked date), not completed_at -- completed_at
     # only exists for sessions completed after that column was added, so
@@ -1162,9 +1160,9 @@ async def analytics_timeseries(request: Request, date_from: str = "", date_to: s
         signups_by_day[day] = signups_by_day.get(day, 0) + 1
 
     revenue_by_day: dict[str, float] = {}
-    for row in subscriptions:
+    for row in paid_sessions:
         day = (row.get("created_at") or "")[:10]
-        revenue_by_day[day] = revenue_by_day.get(day, 0) + (row.get("amount") or 0)
+        revenue_by_day[day] = revenue_by_day.get(day, 0) + ctx.settings.razorpay_consult_fee_inr
 
     consultations_by_day: dict[str, int] = {}
     for row in completed_sessions:
@@ -1233,7 +1231,7 @@ async def analytics_reports(request: Request, date_from: str = "", date_to: str 
     # state machine (see app/agent/tools/booking.py's docstring for the
     # full status list).
     sessions_in_range = (
-        client.table("doctor_sessions").select("status")
+        client.table("doctor_sessions").select("status,payment_status")
         .gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
     )
     booking_total = len(sessions_in_range)
@@ -1250,28 +1248,19 @@ async def analytics_reports(request: Request, date_from: str = "", date_to: str 
         "declined_or_cancelled_rate": round(declined_or_cancelled_n / booking_total, 3) if booking_total else 0,
     }
 
-    # --- Revenue: current mix by plan (point-in-time, like estimated_mrr in
-    # analytics_overview) plus churn (cancellations) within the date range.
-    all_subs = client.table("subscriptions").select("plan_name,amount,status,cancelled_at").execute().data or []
-    active_subs = [s for s in all_subs if s.get("status") == "active"]
-    revenue_by_plan: dict[str, dict[str, Any]] = {}
-    for s in active_subs:
-        plan = s.get("plan_name") or "Unknown"
-        entry = revenue_by_plan.setdefault(plan, {"plan_name": plan, "active_count": 0, "mrr": 0})
-        entry["active_count"] += 1
-        entry["mrr"] += s.get("amount") or 0
-    status_counts: dict[str, int] = {}
-    for s in all_subs:
-        st = s.get("status") or "unknown"
-        status_counts[st] = status_counts.get(st, 0) + 1
-    churned_in_range = sum(
-        1 for s in all_subs
-        if s.get("status") == "cancelled" and s.get("cancelled_at") and range_start <= s["cancelled_at"][:10] <= range_end
-    )
+    # --- Revenue: every booked session is a ₹399 consultation fee, no more
+    # recurring plans -- revenue in range is just paid_count * the flat fee.
+    payment_status_counts: dict[str, int] = {}
+    for s in sessions_in_range:
+        st = s.get("payment_status") or "none"
+        payment_status_counts[st] = payment_status_counts.get(st, 0) + 1
+    paid_in_range = payment_status_counts.get("paid", 0)
     revenue = {
-        "by_plan": sorted(revenue_by_plan.values(), key=lambda r: -r["mrr"]),
-        "by_status": [{"status": st, "count": n} for st, n in sorted(status_counts.items(), key=lambda kv: -kv[1])],
-        "churned_in_range": churned_in_range,
+        "paid_consultations": paid_in_range,
+        "consultation_revenue_inr": paid_in_range * ctx.settings.razorpay_consult_fee_inr,
+        "by_payment_status": [
+            {"status": st, "count": n} for st, n in sorted(payment_status_counts.items(), key=lambda kv: -kv[1])
+        ],
     }
 
     # --- Doctor performance: throughput per active vet, all-time (a new
@@ -1353,14 +1342,15 @@ async def delete_platform_cost(platform_id: str, request: Request) -> dict[str, 
 
 
 # ---------------------------------------------------------------------------
-# P&L -- revenue (subscriptions, booked in INR like the rest of this
-# dashboard) vs. platform costs (platform_costs' running totals, mostly
-# billed in USD). These aren't the same currency, so a single "Net" figure
-# needs a conversion -- USD_TO_INR_APPROX is a fixed indicative rate, not a
-# live FX lookup, and every combined figure is explicitly suffixed
-# "_approx" so nothing here is mistaken for accounting-grade output. The
-# by-currency breakdown is always returned too, so an admin who doesn't
-# trust the approximation can just read the real numbers directly.
+# P&L -- revenue (paid ₹399 consultation fees, booked in INR like the rest
+# of this dashboard) vs. platform costs (platform_costs' running totals,
+# mostly billed in USD). These aren't the same currency, so a single "Net"
+# figure needs a conversion -- USD_TO_INR_APPROX is a fixed indicative
+# rate, not a live FX lookup, and every combined figure is explicitly
+# suffixed "_approx" so nothing here is mistaken for accounting-grade
+# output. The by-currency breakdown is always returned too, so an admin
+# who doesn't trust the approximation can just read the real numbers
+# directly.
 # ---------------------------------------------------------------------------
 
 USD_TO_INR_APPROX = 83.0
@@ -1373,19 +1363,14 @@ async def analytics_pnl(request: Request, date_from: str = "", date_to: str = ""
     range_start, range_end = _resolve_range(date_from, date_to)
     range_end_ts = f"{range_end}T23:59:59"
 
-    # Revenue booked in the selected period -- new subscription amounts
-    # created in-range, same query as analytics_timeseries's revenue series.
-    subs_in_range = (
-        client.table("subscriptions").select("amount")
+    # Revenue booked in the selected period -- every consultation that was
+    # actually paid for in-range, at the flat ₹399 fee.
+    paid_sessions_in_range = (
+        client.table("doctor_sessions").select("id")
+        .eq("payment_status", "paid")
         .gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
     )
-    revenue_in_range_inr = sum(s.get("amount") or 0 for s in subs_in_range)
-
-    # Current recurring run-rate (point-in-time, like estimated_mrr in
-    # analytics_overview) -- a period's "booked revenue" and its "MRR" are
-    # different questions, both useful for a P&L view.
-    active_subs = client.table("subscriptions").select("amount").eq("status", "active").execute().data or []
-    estimated_mrr_inr = sum(s.get("amount") or 0 for s in active_subs)
+    revenue_in_range_inr = len(paid_sessions_in_range) * ctx.settings.razorpay_consult_fee_inr
 
     # platform_costs.amount_spent is a running total the admin updates from
     # each platform's own dashboard -- NOT scoped to date_from/date_to (that
@@ -1406,10 +1391,8 @@ async def analytics_pnl(request: Request, date_from: str = "", date_to: str = ""
         "date_from": range_start,
         "date_to": range_end,
         "revenue_in_range_inr": revenue_in_range_inr,
-        "estimated_mrr_inr": estimated_mrr_inr,
         "costs_by_currency": [{"currency": c, "amount": a} for c, a in sorted(costs_by_currency.items())],
         "total_costs_inr_approx": round(total_costs_inr_approx, 2),
         "net_in_range_inr_approx": round(revenue_in_range_inr - total_costs_inr_approx, 2),
-        "net_mrr_inr_approx": round(estimated_mrr_inr - total_costs_inr_approx, 2),
         "fx_rate_used": USD_TO_INR_APPROX,
     }

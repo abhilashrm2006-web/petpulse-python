@@ -1,16 +1,15 @@
 """Covers the deterministic first-contact registration wizard: greeting,
 then three questions (owner name, pet name, city) -- identical for every
-customer, no new-vs-existing branching -- plus the Razorpay Subscriptions
-lifecycle webhook (unrelated to onboarding, still handled by this module).
-Runs entirely outside the LLM agent loop -- every assertion here is about
-direct state transitions and WhatsApp sends, not model behavior."""
+customer, no new-vs-existing branching. Runs entirely outside the LLM
+agent loop -- every assertion here is about direct state transitions and
+WhatsApp sends, not model behavior."""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from app.ingestion.registration import handle_registration, handle_subscription_webhook
+from app.ingestion.registration import handle_registration
 from app.ingestion.webhook import ExtractedMessage
 from tests.fake_supabase import FakeSupabaseClient
 
@@ -170,7 +169,12 @@ async def test_city_step_empty_reply_reprompts():
 
 @pytest.mark.asyncio
 async def test_city_step_saves_city_and_completes_registration():
-    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_city")]})
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [_profile(registration_step="awaiting_city", full_name="Anudeep Reddy")],
+            "pets": [{"id": "pet-1", "profile_id": "profile-1", "name": "Bobby", "created_at": "2026-01-01"}],
+        }
+    )
     ctx = _make_ctx(supabase)
 
     handled = await handle_registration(ctx, _msg(text="Chennai"))
@@ -181,50 +185,8 @@ async def test_city_step_saves_city_and_completes_registration():
     assert profile["registration_step"] == "completed"
     ctx.whatsapp.send_text.assert_awaited_once()
     ctx.whatsapp.send_interactive_buttons.assert_not_awaited()
-
-
-# --- subscription webhook ------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_subscription_webhook_activated_marks_active():
-    supabase = FakeSupabaseClient(initial={"subscriptions": [{"id": "row-1", "provider_subscription_id": "sub_123", "status": "trial"}]})
-    ctx = _make_ctx(supabase)
-    event = {"event": "subscription.activated", "payload": {"subscription": {"entity": {"id": "sub_123", "notes": {}}}}}
-
-    handled = await handle_subscription_webhook(ctx, event)
-
-    assert handled is True
-    assert supabase.rows("subscriptions")[0]["status"] == "active"
-
-
-@pytest.mark.asyncio
-async def test_subscription_webhook_cancelled_marks_cancelled():
-    supabase = FakeSupabaseClient(initial={"subscriptions": [{"id": "row-1", "provider_subscription_id": "sub_123", "status": "active"}]})
-    ctx = _make_ctx(supabase)
-    event = {"event": "subscription.cancelled", "payload": {"subscription": {"entity": {"id": "sub_123", "notes": {}}}}}
-
-    handled = await handle_subscription_webhook(ctx, event)
-
-    assert handled is True
-    assert supabase.rows("subscriptions")[0]["status"] == "cancelled"
-    assert supabase.rows("subscriptions")[0]["cancelled_at"] is not None
-
-
-@pytest.mark.asyncio
-async def test_subscription_webhook_unknown_subscription_id_returns_false():
-    supabase = FakeSupabaseClient(initial={"subscriptions": []})
-    ctx = _make_ctx(supabase)
-    event = {"event": "subscription.activated", "payload": {"subscription": {"entity": {"id": "sub_999", "notes": {}}}}}
-
-    handled = await handle_subscription_webhook(ctx, event)
-
-    assert handled is False
-
-
-@pytest.mark.asyncio
-async def test_subscription_webhook_ignores_non_subscription_events():
-    ctx = _make_ctx(FakeSupabaseClient())
-
-    handled = await handle_subscription_webhook(ctx, {"event": "payment_link.paid", "payload": {}})
-
-    assert handled is False
+    message = ctx.whatsapp.send_text.call_args.args[1]
+    assert "Anudeep" in message
+    assert "Bobby" in message
+    assert "free" in message.lower()
+    assert "₹399" in message

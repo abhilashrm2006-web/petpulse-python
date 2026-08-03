@@ -36,10 +36,9 @@ def _message_to_row(session_id: str, role: str, content: str, pet_id: str | None
 def load_chat_history(
     client: Client, phone_number: str, pet_id: str | None = None, window: int = CONTEXT_WINDOW_LENGTH
 ) -> list[dict[str, str]]:
-    """pet_id scopes the thread to one pet's own history (Subscriber
-    customers only -- see orchestrator.run_agent_turn) instead of one shared
-    account-wide stream, so each pet on a multi-pet Subscriber account
-    carries its own context rather than blending across pets."""
+    """pet_id scopes the thread to one pet's own history instead of one
+    shared account-wide stream, so each pet on a multi-pet account carries
+    its own context rather than blending across pets."""
     query = client.table(CHAT_HISTORY_TABLE).select("*").eq("session_id", phone_number)
     if pet_id:
         query = query.eq("pet_id", pet_id)
@@ -90,8 +89,8 @@ async def extract_and_update_memory(
     if not fields:
         return
 
-    # Must be scoped by pet_id, not just profile_id -- a Subscriber account with
-    # multiple pets was previously reading/writing a single profile_id-only row
+    # Must be scoped by pet_id, not just profile_id -- a multi-pet account was
+    # previously reading/writing a single profile_id-only row
     # regardless of which pet the turn was about, so the second pet discussed
     # would silently overwrite the first pet's durable facts (pet_name, species,
     # breed) with its own. app.ingestion.context._load_memory already expects

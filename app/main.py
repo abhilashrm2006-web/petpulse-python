@@ -22,7 +22,7 @@ from app.deps import AppContext
 from app.ingestion.context import build_context
 from app.ingestion.dedup import claim
 from app.ingestion.media import process_media
-from app.ingestion.registration import handle_registration, handle_subscription_webhook
+from app.ingestion.registration import handle_registration
 from app.ingestion.webhook import extract_message, extract_status_update, verify_webhook_challenge
 from app.integrations import razorpay_client
 from app.integrations.openai_client import make_openai_client
@@ -65,10 +65,10 @@ async def health() -> dict[str, str]:
 @app.get("/passport/{token}")
 async def public_passport(token: str, request: Request) -> Response:
     """Public, unauthenticated view of a pet's health passport -- generating
-    the token is a Subscriber-only action (documents.get_shareable_link),
-    but the link itself needs no login so a vet/boarding facility can open
-    it directly. Renders the same text build_full_passport_text produces
-    for the WhatsApp tool, so both surfaces stay in sync."""
+    the token is documents.get_shareable_link, but the link itself needs no
+    login so a vet/boarding facility can open it directly. Renders the same
+    text build_full_passport_text produces for the WhatsApp tool, so both
+    surfaces stay in sync."""
     ctx: AppContext = request.app.state.ctx
     rows = ctx.supabase.table("pets").select("*").eq("passport_share_token", token).limit(1).execute().data
     if not rows:
@@ -190,10 +190,7 @@ async def receive_razorpay_webhook(request: Request) -> Response:
     event = body.get("event", "")
     logger.info("Received Razorpay webhook event=%s", event)
     try:
-        if event.startswith("subscription."):
-            handled = await handle_subscription_webhook(ctx, body)
-        else:
-            handled = await handle_payment_webhook(ctx, body)
+        handled = await handle_payment_webhook(ctx, body)
         if not handled:
             logger.warning("Razorpay webhook event=%s was not acted on (see handler logs for why)", event)
     except Exception:

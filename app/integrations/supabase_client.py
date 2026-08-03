@@ -101,15 +101,6 @@ def get_profile_by_phone(client: Client, phone_number: str) -> dict[str, Any] | 
     return resp.data[0] if resp.data else None
 
 
-def is_active_subscriber(client: Client, profile_id: str) -> bool:
-    """True only once a subscription is actually confirmed by Razorpay's
-    webhook (status="active") -- status="trial" is set the moment someone
-    taps Subscribe, before they've completed payment authorization, and
-    deliberately does not grant access on its own."""
-    rows = client.table("subscriptions").select("id").eq("profile_id", profile_id).eq("status", "active").limit(1).execute().data
-    return bool(rows)
-
-
 def get_or_create_profile(client: Client, phone_number: str, sender_name: str) -> dict[str, Any]:
     existing = get_profile_by_phone(client, phone_number)
     if existing:

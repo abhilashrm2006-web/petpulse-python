@@ -6,14 +6,11 @@ pet-members-with-phone-number join as a raw
 crashed on the real schema (PGRST201, "Could not embed because more than one
 relationship was found for 'pet_members' and 'profiles'") since pet_members
 has two FKs into profiles (profile_id and added_by). FakeSupabaseClient
-doesn't model that ambiguity, so this suite covers the tier-gating behavior;
-the join fix itself was confirmed against the real DB by reusing
-get_pet_member_contacts (already disambiguated there).
+doesn't model that ambiguity; the join fix itself was confirmed against the
+real DB by reusing get_pet_member_contacts (already disambiguated there).
 
-Per the product spec, Free customers now DO get vaccination reminders --
-just the basic due-date ping, not the fuller Subscriber version (extra
-manufacturer/batch detail when on file). Reminders are a content upgrade
-by tier, not a send gate.
+Every pet member gets the full reminder detail (manufacturer/batch when on
+file) -- there's no more tier distinction to gate content on.
 
 Dates are computed relative to date.today() throughout (not hardcoded) so
 these tests stay valid regardless of when they're run -- the T-3..T-0
@@ -38,7 +35,7 @@ def _due_in(days: int) -> str:
 
 
 @pytest.mark.asyncio
-async def test_free_and_subscriber_pet_members_both_get_a_countdown_reminder_different_detail():
+async def test_every_pet_member_gets_a_countdown_reminder_with_full_detail():
     supabase = FakeSupabaseClient(
         initial={
             "vaccinations": [
@@ -50,14 +47,13 @@ async def test_free_and_subscriber_pet_members_both_get_a_countdown_reminder_dif
             ],
             "pets": [{"id": "pet-1", "name": "Rex"}],
             "pet_members": [
-                {"pet_id": "pet-1", "profile_id": "free-profile", "role": "owner"},
-                {"pet_id": "pet-1", "profile_id": "sub-profile", "role": "family"},
+                {"pet_id": "pet-1", "profile_id": "owner-profile", "role": "owner"},
+                {"pet_id": "pet-1", "profile_id": "family-profile", "role": "family"},
             ],
             "profiles": [
-                {"id": "free-profile", "phone_number": "919000000001", "full_name": "Free Owner"},
-                {"id": "sub-profile", "phone_number": "919000000002", "full_name": "Sub Owner"},
+                {"id": "owner-profile", "phone_number": "919000000001", "full_name": "Owner"},
+                {"id": "family-profile", "phone_number": "919000000002", "full_name": "Family Member"},
             ],
-            "subscriptions": [{"id": "sub-1", "profile_id": "sub-profile", "status": "active"}],
         }
     )
     ctx = _make_ctx(supabase)
@@ -66,7 +62,7 @@ async def test_free_and_subscriber_pet_members_both_get_a_countdown_reminder_dif
 
     sent = {call.args[0]: call.args[1] for call in ctx.whatsapp.send_text.await_args_list}
     assert set(sent) == {"919000000001", "919000000002"}
-    assert "Zoetis" not in sent["919000000001"]
+    assert "Zoetis" in sent["919000000001"]
     assert "Zoetis" in sent["919000000002"]
     assert "3 days" in sent["919000000001"]
 

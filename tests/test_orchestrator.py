@@ -45,7 +45,7 @@ def _make_supabase_mock() -> MagicMock:
     return client
 
 
-def _make_agent_ctx(role: str = "customer", is_subscriber: bool = False) -> AgentContext:
+def _make_agent_ctx(role: str = "customer") -> AgentContext:
     return AgentContext(
         profile={"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane", "onboarding_completed": True, "role": role},
         role=role,
@@ -59,7 +59,6 @@ def _make_agent_ctx(role: str = "customer", is_subscriber: bool = False) -> Agen
         open_session=None,
         pending_negotiation=None,
         onboarding={"complete": True, "missing_fields": []},
-        is_subscriber=is_subscriber,
     )
 
 
@@ -96,7 +95,7 @@ async def test_agent_calls_the_tool_the_model_picks_then_stops(monkeypatch):
         supabase=_make_supabase_mock(),
         openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx()  # check_symptoms is open to Free customers too
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.1",
         timestamp="1700000000", message_type="text", text="Rex has been vomiting",
@@ -193,7 +192,7 @@ async def test_self_messaging_tool_suppresses_final_text(monkeypatch):
         supabase=_make_supabase_mock(),
         openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=True)  # request_doctor_session is subscriber_only
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.2",
         timestamp="1700000001", message_type="text", text="I'd like to book a vet",
@@ -252,7 +251,7 @@ async def test_booking_confirmation_suppresses_duplicate_agent_reply(monkeypatch
         supabase=_make_supabase_mock(),
         openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=True)  # book_slot is subscriber_only
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.3",
         timestamp="1700000002", message_type="text", text="Tuesday 11:30am works",
@@ -265,61 +264,8 @@ async def test_booking_confirmation_suppresses_duplicate_agent_reply(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_free_customer_blocked_from_subscriber_only_tool_with_upsell(monkeypatch):
-    """A Free customer calling a Subscriber-only tool (book_slot) must never
-    reach the real tool function -- the orchestrator should short-circuit
-    with a subscriber_only_feature error, and the agent's composed reply
-    (relaying that error, per the system prompt) should still go out."""
-    tool_calls_made = []
-
-    async def fake_tool(ctx, agent_ctx, **kwargs):
-        tool_calls_made.append(kwargs)
-        return {"success": True, "mode": "booked"}
-
-    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [{"type": "function", "function": {"name": "book_slot"}}])
-    monkeypatch.setattr(orchestrator, "get_tool_fn", lambda name: fake_tool)
-    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
-
-    responses = [
-        _fake_response(None, [_fake_tool_call("call-1", "book_slot", {"session_id": "s1", "slot_start": "2026-07-28T11:30:00+05:30"})]),
-        _fake_response("That's a Subscriber feature — want the subscribe link?", None),
-    ]
-
-    async def fake_chat_with_tools(client, settings, messages, tools):
-        return responses.pop(0)
-
-    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
-    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
-    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
-    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
-
-    settings = Settings(openai_agent_max_iterations=10)
-    ctx = AppContext(
-        settings=settings,
-        http=None,
-        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
-        supabase=_make_supabase_mock(),
-        openai=MagicMock(),
-    )
-    agent_ctx = _make_agent_ctx(is_subscriber=False)
-    extracted = ExtractedMessage(
-        phone_number="919876543210", sender_name="Jane", message_id="wamid.4",
-        timestamp="1700000003", message_type="text", text="Book me a vet slot",
-    )
-
-    result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
-
-    assert tool_calls_made == []  # the real tool must never have been called
-    assert result == "That's a Subscriber feature — want the subscribe link?"
-    ctx.whatsapp.send_reply_and_chunk.assert_awaited_once_with("919876543210", result)
-
-
-@pytest.mark.asyncio
-async def test_free_customer_can_still_reach_check_symptoms(monkeypatch):
-    """The triage assessment itself is never paywalled -- a Free customer
-    reporting a symptom must reach the real check_symptoms call. Only
-    booking an actual consultation afterward is Subscriber-gated (covered
-    by the book_slot test above)."""
+async def test_customer_can_reach_check_symptoms(monkeypatch):
+    """The triage assessment is never paywalled -- open to every customer."""
     tool_calls_made = []
 
     async def fake_tool(ctx, agent_ctx, **kwargs):
@@ -351,7 +297,7 @@ async def test_free_customer_can_still_reach_check_symptoms(monkeypatch):
         supabase=_make_supabase_mock(),
         openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=False)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.5",
         timestamp="1700000004", message_type="text", text="Rex has been vomiting",
@@ -359,28 +305,18 @@ async def test_free_customer_can_still_reach_check_symptoms(monkeypatch):
 
     result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
 
-    assert tool_calls_made == [{"symptoms": "vomiting"}]  # the real tool WAS called for a Free customer
+    assert tool_calls_made == [{"symptoms": "vomiting"}]
     assert result == "🟠 Urgent (4/5) — would you like to book a vet consultation for this?"
     ctx.whatsapp.send_reply_and_chunk.assert_awaited_once_with("919876543210", result)
 
 
 @pytest.mark.asyncio
-async def test_free_customer_gets_no_persistent_memory(monkeypatch):
-    """Free customers start fresh every turn -- load_chat_history must not
-    even be called, and nothing gets appended/extracted afterward."""
-    load_calls = []
-    append_calls = []
-
-    async def fake_tool(ctx, agent_ctx, **kwargs):
-        return {"success": True}
-
+async def test_welcome_sticker_sent_for_bare_greeting(monkeypatch):
     monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
-    monkeypatch.setattr(orchestrator, "get_tool_fn", lambda name: fake_tool)
     monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
-    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: load_calls.append(pet_id) or [])
-    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: append_calls.append(k))
-    extract_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", extract_mock)
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
 
     responses = [_fake_response("Just a friendly reply.", None)]
 
@@ -395,7 +331,7 @@ async def test_free_customer_gets_no_persistent_memory(monkeypatch):
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_sticker=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=False)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.6",
         timestamp="1700000005", message_type="text", text="hi",
@@ -403,16 +339,13 @@ async def test_free_customer_gets_no_persistent_memory(monkeypatch):
 
     await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
 
-    assert load_calls == []
-    assert append_calls == []
-    extract_mock.assert_not_awaited()
     ctx.whatsapp.send_sticker.assert_awaited_once_with("919876543210", settings.pulsy_welcome_sticker_url)
 
 
 @pytest.mark.asyncio
-async def test_subscriber_gets_pet_scoped_memory(monkeypatch):
-    """Subscriber history is scoped to the active pet, not just the phone
-    number, so a multi-pet account doesn't blend context across pets."""
+async def test_customer_gets_pet_scoped_memory(monkeypatch):
+    """Chat history is scoped to the active pet, not just the phone number,
+    so a multi-pet account doesn't blend context across pets."""
     load_calls = []
     append_calls = []
 
@@ -438,7 +371,7 @@ async def test_subscriber_gets_pet_scoped_memory(monkeypatch):
         settings=settings, http=None, whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.7",
         timestamp="1700000006", message_type="text", text="tell me about Rex",
@@ -451,8 +384,8 @@ async def test_subscriber_gets_pet_scoped_memory(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_voice_reply_sent_for_subscriber_voice_note_in_regional_language(monkeypatch):
-    """The actual feature: a Subscriber who sends a voice note gets a spoken
+async def test_voice_reply_sent_for_voice_note_in_regional_language(monkeypatch):
+    """The actual feature: a customer who sends a voice note gets a spoken
     reply back in the language they spoke, on top of the usual text reply."""
     monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
     monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
@@ -480,7 +413,7 @@ async def test_voice_reply_sent_for_subscriber_voice_note_in_regional_language(m
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.voice1",
         timestamp="1700000010", message_type="audio", text="",
@@ -518,47 +451,13 @@ async def test_voice_reply_not_sent_for_text_message(monkeypatch):
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.text1",
         timestamp="1700000011", message_type="text", text="how is Rex doing",
     )
 
     await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
-
-    detect_mock.assert_not_awaited()
-    ctx.whatsapp.send_audio.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_voice_reply_not_sent_for_free_tier_voice_note(monkeypatch):
-    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
-    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
-
-    detect_mock = AsyncMock(return_value="ta")
-    monkeypatch.setattr(orchestrator, "detect_regional_language", detect_mock)
-    monkeypatch.setattr(orchestrator, "synthesize_speech", AsyncMock(return_value=b"bytes"))
-
-    responses = [_fake_response("Here's some general advice.", None)]
-
-    async def fake_chat_with_tools(client, settings, messages, tools):
-        return responses.pop(0)
-
-    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
-
-    settings = Settings(openai_agent_max_iterations=10, voice_replies_enabled=True)
-    ctx = AppContext(
-        settings=settings, http=None,
-        whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
-        supabase=_make_supabase_mock(), openai=MagicMock(),
-    )
-    agent_ctx = _make_agent_ctx(is_subscriber=False)  # Free tier
-    extracted = ExtractedMessage(
-        phone_number="919876543210", sender_name="Jane", message_id="wamid.voice2",
-        timestamp="1700000012", message_type="audio", text="",
-    )
-
-    await orchestrator.run_agent_turn(ctx, agent_ctx, extracted, media_context="[Voice note analysis] hello")
 
     detect_mock.assert_not_awaited()
     ctx.whatsapp.send_audio.assert_not_awaited()
@@ -589,7 +488,7 @@ async def test_voice_reply_not_sent_when_voice_replies_disabled(monkeypatch):
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.voice3",
         timestamp="1700000013", message_type="audio", text="",
@@ -626,7 +525,7 @@ async def test_voice_reply_not_sent_when_detected_language_is_english(monkeypatc
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.voice4",
         timestamp="1700000014", message_type="audio", text="",
@@ -664,7 +563,7 @@ async def test_voice_reply_failure_does_not_break_the_turn(monkeypatch):
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_audio=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.voice5",
         timestamp="1700000015", message_type="audio", text="",
@@ -698,7 +597,7 @@ async def test_welcome_image_not_sent_for_non_greeting_message(monkeypatch):
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_sticker=AsyncMock()),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=False)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.greet2",
         timestamp="1700000016", message_type="text", text="hi, my dog is limping",
@@ -764,7 +663,7 @@ async def test_welcome_image_send_failure_does_not_break_the_turn(monkeypatch):
         whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock(), send_sticker=AsyncMock(side_effect=RuntimeError("boom"))),
         supabase=_make_supabase_mock(), openai=MagicMock(),
     )
-    agent_ctx = _make_agent_ctx(is_subscriber=False)
+    agent_ctx = _make_agent_ctx()
     extracted = ExtractedMessage(
         phone_number="919876543210", sender_name="Jane", message_id="wamid.greet4",
         timestamp="1700000018", message_type="text", text="hey",

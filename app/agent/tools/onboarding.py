@@ -95,18 +95,6 @@ async def save_onboarding_field(
             client.table("pets").update({"name": normalized}).eq("id", resolution.pet["id"]).execute()
             resolution.pet["name"] = normalized  # keep agent_ctx.pets in sync for later calls this same turn
             return {"success": True, "field": field, "savedValue": normalized}
-        # The first pet (created during registration, before a tier is even chosen)
-        # is never blocked -- only a SECOND+ pet requires Subscriber (Multi Pet
-        # Management is a Subscriber-only feature per the tier spec).
-        if not agent_ctx.is_subscriber and len(agent_ctx.pets) >= 1:
-            return {
-                "success": False,
-                "error": "subscriber_only_feature",
-                "message": "Track every pet's full health timeline in one place — subscribe for ₹399/month to "
-                "add unlimited pets, plus the full vaccination passport, records vault, and a free vet consult "
-                "every month. Want me to send you the subscribe link?",
-            }
-
         created = (
             client.table("pets")
             .insert({"profile_id": agent_ctx.profile["id"], "name": normalized, "species": "Other"})

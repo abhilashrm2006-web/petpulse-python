@@ -11,10 +11,9 @@ from app.agent.system_prompt import (
     CASUAL_TONE_RULE,
     CUSTOMER_RULES,
     FORMATTING_RULES,
-    FREE_TIER_PERSONALIZATION_RULE,
     GREETING_RULE,
+    PERSONALIZATION_RULE,
     SAFETY_RULES,
-    SUBSCRIBER_PERSONALIZATION_RULE,
     VET_RULES,
     VOICE_REPLY_LANGUAGE_RULE_TEMPLATE,
     _pet_name_for,
@@ -39,43 +38,34 @@ def test_greeting_rule_only_applies_to_customer_role():
     assert GREETING_RULE not in build_system_prompt("vet")
 
 
-def test_subscriber_gets_hindi_and_breed_aware_personalization_rule():
-    prompt = build_system_prompt("customer", is_subscriber=True)
-    assert SUBSCRIBER_PERSONALIZATION_RULE in prompt
-    assert FREE_TIER_PERSONALIZATION_RULE not in prompt
+def test_customer_gets_hindi_and_breed_aware_personalization_rule():
+    prompt = build_system_prompt("customer")
+    assert PERSONALIZATION_RULE in prompt
 
 
-def test_free_customer_gets_english_only_breed_generic_rule():
-    prompt = build_system_prompt("customer", is_subscriber=False)
-    assert FREE_TIER_PERSONALIZATION_RULE in prompt
-    assert SUBSCRIBER_PERSONALIZATION_RULE not in prompt
+def test_vet_gets_no_personalization_rule():
+    prompt = build_system_prompt("vet")
+    assert PERSONALIZATION_RULE not in prompt
 
 
-def test_vet_gets_neither_personalization_rule():
-    prompt = build_system_prompt("vet", is_subscriber=False)
-    assert SUBSCRIBER_PERSONALIZATION_RULE not in prompt
-    assert FREE_TIER_PERSONALIZATION_RULE not in prompt
-
-
-def test_subscriber_personalization_rule_covers_major_regional_languages_not_just_hindi():
+def test_personalization_rule_covers_major_regional_languages_not_just_hindi():
     for language in ("Hindi", "Tamil", "Telugu", "Kannada", "Malayalam", "Bengali", "Marathi", "Gujarati", "Punjabi", "Urdu"):
-        assert language in SUBSCRIBER_PERSONALIZATION_RULE
+        assert language in PERSONALIZATION_RULE
 
 
-def test_subscriber_personalization_rule_covers_all_22_eighth_schedule_languages():
+def test_personalization_rule_covers_all_22_eighth_schedule_languages():
     """Expanded from the original 10 to all 22 -- built dynamically from
     app.agent.language.SUPPORTED_LANGUAGES so the two lists can't drift."""
     from app.agent.language import SUPPORTED_LANGUAGES
 
     for language in SUPPORTED_LANGUAGES.values():
-        assert language in SUBSCRIBER_PERSONALIZATION_RULE
+        assert language in PERSONALIZATION_RULE
 
 
 def test_casual_tone_rule_applies_to_customers_not_vets():
     """Vets keep a professional/brief tone (VET_RULES) -- the casual/slang
     style is a customer-facing thing only."""
-    assert CASUAL_TONE_RULE in build_system_prompt("customer", is_subscriber=False)
-    assert CASUAL_TONE_RULE in build_system_prompt("customer", is_subscriber=True)
+    assert CASUAL_TONE_RULE in build_system_prompt("customer")
     assert CASUAL_TONE_RULE not in build_system_prompt("vet")
 
 
@@ -113,17 +103,13 @@ def test_voice_reply_language_rule_asks_for_natural_spoken_style():
     assert "real person talking" in formatted
 
 
-def test_voice_reply_language_rule_only_applies_to_subscriber_with_a_detected_language():
-    prompt = build_system_prompt("customer", is_subscriber=True, voice_reply_language="Tamil")
+def test_voice_reply_language_rule_only_applies_with_a_detected_language():
+    prompt = build_system_prompt("customer", voice_reply_language="Tamil")
     assert VOICE_REPLY_LANGUAGE_RULE_TEMPLATE.format(language="Tamil") in prompt
 
-    # No detected language -> no override, even for a Subscriber.
-    prompt_no_language = build_system_prompt("customer", is_subscriber=True, voice_reply_language=None)
+    # No detected language -> no override.
+    prompt_no_language = build_system_prompt("customer", voice_reply_language=None)
     assert VOICE_REPLY_LANGUAGE_RULE_TEMPLATE.format(language="Tamil") not in prompt_no_language
-
-    # Free tier never gets the voice-reply override even if a language was somehow detected.
-    prompt_free = build_system_prompt("customer", is_subscriber=False, voice_reply_language="Tamil")
-    assert VOICE_REPLY_LANGUAGE_RULE_TEMPLATE.format(language="Tamil") not in prompt_free
 
 
 def test_general_pet_qa_is_explicitly_in_scope_for_customers():

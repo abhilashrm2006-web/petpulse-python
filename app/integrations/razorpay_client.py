@@ -43,38 +43,6 @@ async def create_payment_link(
         return resp.json()
 
 
-async def create_subscription(
-    settings: Settings,
-    *,
-    customer_name: str,
-    customer_phone: str,
-    reference_id: str,
-    plan_id: str | None = None,
-) -> dict[str, Any]:
-    """Creates a Razorpay Subscription against a pre-created monthly Plan --
-    a different API from create_payment_link's one-off links, since this
-    bills on a recurring cadence. Defaults to the standard ₹399
-    Settings.razorpay_subscription_plan_id; pass plan_id explicitly for a
-    different cohort (e.g. the ₹99 Founding Member plan). Razorpay has no
-    "no end date" option; total_count=100 (~8 years of monthly billing)
-    stands in for "until cancelled" -- the actual end is whatever
-    subscription.cancelled reports via the webhook, not this count running
-    out."""
-    async with httpx.AsyncClient(timeout=30.0, auth=(settings.razorpay_key_id, settings.razorpay_key_secret)) as client:
-        resp = await client.post(
-            f"{RAZORPAY_API_BASE}/subscriptions",
-            json={
-                "plan_id": plan_id or settings.razorpay_subscription_plan_id,
-                "customer_notify": 1,
-                "total_count": 100,
-                "notify_info": {"notify_phone": customer_phone},
-                "notes": {"reference_id": reference_id, "customer_name": customer_name},
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-
 async def cancel_subscription(settings: Settings, provider_subscription_id: str) -> dict[str, Any]:
     """Cancels immediately (cancel_at_cycle_end=0) -- used by the admin
     dashboard's customer-deactivate action (app/admin/routes.py), where the
@@ -87,21 +55,6 @@ async def cancel_subscription(settings: Settings, provider_subscription_id: str)
         )
         resp.raise_for_status()
         return resp.json()
-
-
-def extract_subscription_event(event_body: dict[str, Any]) -> tuple[str, str, str | None] | None:
-    """Returns (event_type, subscription_id, reference_id) for any
-    subscription.* webhook event (activated/charged/cancelled/etc.), or
-    None if this event isn't one -- reference_id is whatever profile
-    create_subscription tagged it with in `notes`."""
-    event = event_body.get("event", "")
-    if not event.startswith("subscription."):
-        return None
-    try:
-        entity = event_body["payload"]["subscription"]["entity"]
-        return event, entity["id"], (entity.get("notes") or {}).get("reference_id")
-    except (KeyError, TypeError):
-        return None
 
 
 def verify_webhook_signature(settings: Settings, raw_body: bytes, signature_header: str | None) -> bool:

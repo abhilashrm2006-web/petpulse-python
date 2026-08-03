@@ -90,7 +90,6 @@ async def test_file_document_files_to_the_exact_pet_id_once_disambiguated(monkey
             document_bytes=b"fake-bytes", document_mime_type="image/jpeg", document_classification=None, media_context="vaccination card",
         ),
         profile={"id": "vet-1"},
-        is_subscriber=True,
     )
     ctx = SimpleNamespace(supabase=supabase, whatsapp=None, settings=None, openai=AsyncMock())
 
@@ -123,7 +122,6 @@ async def test_two_documents_filed_same_day_get_distinct_storage_paths(monkeypat
             document_bytes=b"fake-bytes", document_mime_type="image/jpeg", document_classification=None, media_context="lab report",
         ),
         profile={"id": "profile-1"},
-        is_subscriber=True,
     )
     ctx = SimpleNamespace(supabase=supabase, whatsapp=None, settings=None, openai=AsyncMock())
 
@@ -151,39 +149,15 @@ async def test_send_pet_document_surfaces_owner_disambiguation_instead_of_guessi
 
 
 @pytest.mark.asyncio
-async def test_free_customer_blocked_at_5_document_cap(monkeypatch):
+async def test_file_document_has_no_cap(monkeypatch):
     from tests.fake_supabase import FakeSupabaseClient
-    from app.agent.tools.documents import FREE_DOCUMENT_CAP
 
-    existing_docs = [{"id": f"doc-{i}", "pet_id": "pet-1"} for i in range(FREE_DOCUMENT_CAP)]
-    supabase = FakeSupabaseClient(initial={"documents": existing_docs})
-    agent_ctx = SimpleNamespace(
-        pets=[{"id": "pet-1", "name": "Rex"}],
-        pending_media=SimpleNamespace(document_bytes=b"fake-bytes", document_mime_type="image/jpeg", document_classification=None, media_context=""),
-        profile={"id": "profile-1"},
-        is_subscriber=False,
-    )
-    ctx = SimpleNamespace(supabase=supabase, whatsapp=None, settings=None, openai=AsyncMock())
-
-    result = await file_document(ctx, agent_ctx, pet_id="pet-1")
-
-    assert result["success"] is False
-    assert result["error"] == "subscriber_only_feature"
-    assert len(supabase.rows("documents")) == FREE_DOCUMENT_CAP
-
-
-@pytest.mark.asyncio
-async def test_subscriber_never_hits_the_document_cap(monkeypatch):
-    from tests.fake_supabase import FakeSupabaseClient
-    from app.agent.tools.documents import FREE_DOCUMENT_CAP
-
-    existing_docs = [{"id": f"doc-{i}", "pet_id": "pet-1"} for i in range(FREE_DOCUMENT_CAP + 3)]
+    existing_docs = [{"id": f"doc-{i}", "pet_id": "pet-1"} for i in range(8)]
     supabase = FakeSupabaseClient(initial={"documents": existing_docs})
     agent_ctx = SimpleNamespace(
         pets=[{"id": "pet-1", "name": "Rex"}],
         pending_media=SimpleNamespace(document_bytes=b"fake-bytes", document_mime_type="image/jpeg", document_classification=None, media_context="lab report"),
         profile={"id": "profile-1"},
-        is_subscriber=True,
     )
     ctx = SimpleNamespace(supabase=supabase, whatsapp=None, settings=None, openai=AsyncMock())
     monkeypatch.setattr("app.agent.tools.documents.upload_to_storage", lambda *a, **k: None)
@@ -192,7 +166,7 @@ async def test_subscriber_never_hits_the_document_cap(monkeypatch):
     result = await file_document(ctx, agent_ctx, pet_id="pet-1")
 
     assert result["success"] is True
-    assert len(supabase.rows("documents")) == FREE_DOCUMENT_CAP + 4
+    assert len(supabase.rows("documents")) == 9
 
 
 @pytest.mark.asyncio
@@ -251,32 +225,7 @@ async def test_get_shareable_link_is_stable_across_calls():
 
 
 @pytest.mark.asyncio
-async def test_free_customer_gets_basic_due_date_passport():
-    from tests.fake_supabase import FakeSupabaseClient
-    from app.agent.tools.documents import get_pet_passport
-
-    supabase = FakeSupabaseClient(
-        initial={
-            "vaccinations": [
-                {"id": "v1", "pet_id": "pet-1", "vaccine_name": "Rabies", "date_administered": "2025-07-01", "next_due_date": "2026-07-01", "manufacturer": "Zoetis", "batch_number": "LOT-1"},
-            ]
-        }
-    )
-    agent_ctx = SimpleNamespace(pets=[{"id": "pet-1", "name": "Rex", "species": "Dog"}], profile={"phone_number": "919876543210"}, is_subscriber=False)
-    ctx = SimpleNamespace(supabase=supabase, whatsapp=None)
-
-    result = await get_pet_passport(ctx, agent_ctx, pet_id="pet-1")
-
-    assert result["success"] is True
-    assert "Rabies" in result["passport_text"]
-    assert "due 2026-07-01" in result["passport_text"]
-    assert "Zoetis" not in result["passport_text"]
-    assert "Batch" not in result["passport_text"]
-    assert "overdue_vaccinations" not in result
-
-
-@pytest.mark.asyncio
-async def test_subscriber_gets_full_passport_with_batch_details(monkeypatch):
+async def test_get_pet_passport_includes_full_batch_details(monkeypatch):
     from tests.fake_supabase import FakeSupabaseClient
     from app.agent.tools.documents import get_pet_passport
 
@@ -288,7 +237,7 @@ async def test_subscriber_gets_full_passport_with_batch_details(monkeypatch):
             "medical_records": [],
         }
     )
-    agent_ctx = SimpleNamespace(pets=[{"id": "pet-1", "name": "Rex", "species": "Dog"}], profile={"phone_number": "919876543210"}, is_subscriber=True)
+    agent_ctx = SimpleNamespace(pets=[{"id": "pet-1", "name": "Rex", "species": "Dog"}], profile={"phone_number": "919876543210"})
     ctx = SimpleNamespace(supabase=supabase, whatsapp=SimpleNamespace(send_document=AsyncMock(), send_image=AsyncMock()))
 
     result = await get_pet_passport(ctx, agent_ctx, pet_id="pet-1", send_certificates=False)

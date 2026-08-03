@@ -13,7 +13,7 @@ from app.admin.intent_rating import rate_customer_intent
 from app.availability.slots import IST
 from app.deps import AppContext
 from app.integrations import google_drive
-from app.integrations.supabase_client import get_pet_member_contacts, is_active_subscriber, is_unique_violation
+from app.integrations.supabase_client import get_pet_member_contacts, is_unique_violation
 from app.media_pipeline.doctor_documents import extract_doctor_fields
 
 logger = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ async def _send_countdown_reminders(ctx: AppContext, client, today: date) -> Non
             profile_id = member.get("profile_id")
             if not phone or not profile_id:
                 continue
-            text = full_text if is_active_subscriber(client, profile_id) else basic_text
+            text = full_text
             try:
                 await ctx.whatsapp.send_text(phone, text)
                 any_sent = True
@@ -162,7 +162,7 @@ async def _send_overdue_reminders(ctx: AppContext, client, today_iso: str) -> No
             profile_id = member.get("profile_id")
             if not phone or not profile_id:
                 continue
-            text = full_text if is_active_subscriber(client, profile_id) else basic_text
+            text = full_text
             try:
                 await ctx.whatsapp.send_text(phone, text)
                 any_sent = True

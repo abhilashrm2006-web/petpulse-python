@@ -5,10 +5,8 @@ where "the LLM decides" is intentionally bounded by a safety net."""
 
 import json
 import re
-from datetime import datetime
 from typing import Any
 
-from app.availability.slots import IST
 from app.deps import AppContext
 from app.ingestion.context import AgentContext
 from app.integrations.openai_client import json_completion
@@ -22,12 +20,6 @@ uncertain. Never diagnose or prescribe. Respond with strict JSON:
 first_aid_checklist is a short ordered list of concrete first-aid/at-home steps appropriate right now \
 (e.g. "Keep them calm and limit movement", "Do not give any food or water"), not a repeat of the \
 recommendation sentence."""
-
-# Free tier gets a capped number of check_symptoms calls per calendar month
-# (account-wide, not per pet) -- Subscribers are unlimited. Counted against
-# health_logs, which already gets one row per successful assessment, same
-# pattern as the consult quota in booking.py.
-FREE_SYMPTOM_QUERY_LIMIT = 4
 
 SEVERITY_COLOR = {1: "Green", 2: "Green", 3: "Yellow", 4: "Red", 5: "Red"}
 
@@ -56,18 +48,6 @@ def _severity_display(severity: int, severity_label: str) -> str:
     return f"{emoji} {label} ({severity}/5)"
 
 
-def _free_quota_used_up(client, profile_id: str) -> bool:
-    month_start = datetime.now(tz=IST).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-    rows = (
-        client.table("health_logs")
-        .select("id")
-        .eq("profile_id", profile_id)
-        .gte("created_at", month_start)
-        .execute()
-        .data
-        or []
-    )
-    return len(rows) >= FREE_SYMPTOM_QUERY_LIMIT
 
 
 def _keyword_hit(patterns: list[str], text: str) -> list[str]:
@@ -114,15 +94,6 @@ async def check_symptoms(
     pet = resolution.pet or {}
     species = species or pet.get("species", "")
 
-    if not agent_ctx.is_subscriber and _free_quota_used_up(ctx.supabase, agent_ctx.profile["id"]):
-        return {
-            "success": False,
-            "error": "quota_exceeded",
-            "message": f"You've used your {FREE_SYMPTOM_QUERY_LIMIT} free symptom checks for this month — "
-            "subscribe for ₹399/month for unlimited checks, plus the full vaccination passport, records "
-            "vault, and multi-pet support.",
-        }
-
     user_prompt = f"Species: {species}\nPet: {pet_name or pet.get('name', 'unknown')}\nSymptoms: {symptoms}"
 
     assessment_failed = False
@@ -165,23 +136,6 @@ async def check_symptoms(
         ).execute()
 
     color = SEVERITY_COLOR.get(severity, "Yellow")
-
-    if not agent_ctx.is_subscriber:
-        # Free: one label + one sentence, no red_flags/categories/reasoning/checklist,
-        # and no consultation offer -- Red always says to seek emergency care right
-        # now regardless of tier, since that safety net never waits on a subscription.
-        one_liner = (
-            "This sounds like it could be a real emergency — please seek emergency vet care right now."
-            if color == "Red"
-            else verdict.get("recommendation", "")
-        )
-        return {
-            "success": True,
-            "severity_color": color,
-            "message": one_liner,
-            "assessment_failed": assessment_failed,
-            "action": "emergency" if color == "Red" else "advise",
-        }
 
     return {
         "success": True,

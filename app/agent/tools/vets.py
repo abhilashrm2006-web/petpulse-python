@@ -1,11 +1,11 @@
 """Ports `S50mzeVEaYXIbhk2` — Nearby Vet Finder / `find_nearby_vets` (spec
-§3.4). Live version uses Nominatim + Overpass (OSM), fixed 8km radius. Free
-customers get the plain list (name/address/distance); Subscribers can pass
-open_now/emergency_24h/category to filter it, computed from whatever OSM
-opening_hours/healthcare/name tags happen to be on file for that clinic --
-there is no ratings/reviews field in OSM data, so that specific filter from
-the product spec has no data source without adding a paid Google Places API
-dependency, and is deliberately not implemented here."""
+§3.4). Live version uses Nominatim + Overpass (OSM), fixed 8km radius. Every
+customer can pass open_now/emergency_24h/category to filter results,
+computed from whatever OSM opening_hours/healthcare/name tags happen to be
+on file for that clinic -- there is no ratings/reviews field in OSM data,
+so that specific filter from the product spec has no data source without
+adding a paid Google Places API dependency, and is deliberately not
+implemented here."""
 
 import math
 from typing import Any
@@ -90,10 +90,6 @@ async def find_nearby_vets(
     resp.raise_for_status()
     elements = resp.json().get("elements", [])
 
-    # Subscriber-only filters -- silently no-op for a Free customer even if
-    # the LLM passed them, since find_nearby_vets itself isn't tool-gated.
-    apply_filters = getattr(agent_ctx, "is_subscriber", False)
-
     clinics = []
     for el in elements:
         tags = el.get("tags", {})
@@ -102,13 +98,12 @@ async def find_nearby_vets(
         if el_lat is None or el_lon is None:
             continue
         opening_hours = tags.get("opening_hours")
-        if apply_filters:
-            if open_now and not _is_24h(opening_hours):
-                continue  # can't reliably evaluate arbitrary opening_hours syntax against "right now" -- only 24/7 is a safe yes
-            if emergency_24h and not _is_24h(opening_hours):
-                continue
-            if category and not _matches_category(tags, category):
-                continue
+        if open_now and not _is_24h(opening_hours):
+            continue  # can't reliably evaluate arbitrary opening_hours syntax against "right now" -- only 24/7 is a safe yes
+        if emergency_24h and not _is_24h(opening_hours):
+            continue
+        if category and not _matches_category(tags, category):
+            continue
         clinics.append(
             {
                 "name": tags.get("name", "Unnamed clinic"),

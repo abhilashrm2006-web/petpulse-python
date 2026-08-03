@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 # All 22 languages listed in the Indian Constitution's Eighth Schedule, beyond
 # the Hindi-only text personalization that existed before this feature (see
-# app/agent/system_prompt.py SUBSCRIBER_PERSONALIZATION_RULE, which builds its
-# language list from this dict rather than hardcoding one, so the two can't
-# drift out of sync). Live-verified (real API call, not assumed) that
+# app/agent/system_prompt.py PERSONALIZATION_RULE, which builds its language
+# list from this dict rather than hardcoding one, so the two can't drift out
+# of sync). Live-verified (real API call, not assumed) that
 # gpt-5.4/gpt-4o-mini-tts produce real native-script text and non-trivial
 # audio for every one of these, including the lower-resource ones (Bodo,
 # Dogri, Kashmiri, Konkani, Maithili, Manipuri, Santali, Sindhi) -- quality

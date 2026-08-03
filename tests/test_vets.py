@@ -1,7 +1,7 @@
-"""Covers find_nearby_vets tier behavior: Free gets the plain list, unfiltered
-even if filter args are passed; Subscriber filters apply. OSM data has no
-ratings field, so that spec filter is deliberately not implemented (see
-module docstring in app/agent/tools/vets.py)."""
+"""Covers find_nearby_vets filter behavior: open to every customer, and
+filters apply whenever passed. OSM data has no ratings field, so that spec
+filter is deliberately not implemented (see module docstring in
+app/agent/tools/vets.py)."""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -24,24 +24,14 @@ def _make_ctx():
     return SimpleNamespace(http=http)
 
 
-def _make_agent_ctx(is_subscriber):
-    return SimpleNamespace(profile={"city": "Bengaluru", "state": "", "country": ""}, is_subscriber=is_subscriber)
+def _make_agent_ctx():
+    return SimpleNamespace(profile={"city": "Bengaluru", "state": "", "country": ""})
 
 
 @pytest.mark.asyncio
-async def test_free_customer_gets_unfiltered_list_even_if_filters_passed():
+async def test_emergency_24h_filter_narrows_results():
     ctx = _make_ctx()
-    agent_ctx = _make_agent_ctx(is_subscriber=False)
-
-    result = await find_nearby_vets(ctx, agent_ctx, location_text="Bengaluru", emergency_24h=True)
-
-    assert result["count"] == 2  # filter silently ignored for Free
-
-
-@pytest.mark.asyncio
-async def test_subscriber_emergency_24h_filter_narrows_results():
-    ctx = _make_ctx()
-    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    agent_ctx = _make_agent_ctx()
 
     result = await find_nearby_vets(ctx, agent_ctx, location_text="Bengaluru", emergency_24h=True)
 
@@ -50,9 +40,9 @@ async def test_subscriber_emergency_24h_filter_narrows_results():
 
 
 @pytest.mark.asyncio
-async def test_subscriber_without_filters_gets_everything():
+async def test_no_filters_gets_everything():
     ctx = _make_ctx()
-    agent_ctx = _make_agent_ctx(is_subscriber=True)
+    agent_ctx = _make_agent_ctx()
 
     result = await find_nearby_vets(ctx, agent_ctx, location_text="Bengaluru")
 

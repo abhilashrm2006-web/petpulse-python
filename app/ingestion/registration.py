@@ -10,12 +10,10 @@ immediately and the existing agent pipeline runs completely unchanged.
 """
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from app.deps import AppContext
 from app.ingestion.webhook import ExtractedMessage
-from app.integrations import razorpay_client
 from app.integrations.supabase_client import get_profile_by_phone, is_unique_violation
 
 logger = logging.getLogger(__name__)
@@ -128,37 +126,25 @@ async def _handle_city(ctx: AppContext, profile: dict[str, Any], extracted: Extr
         await ctx.whatsapp.send_text(phone, "Please type your city.")
         return True
     ctx.supabase.table("profiles").update({"city": city, "registration_step": "completed"}).eq("id", profile["id"]).execute()
+
+    pets = (
+        ctx.supabase.table("pets").select("name").eq("profile_id", profile["id"])
+        .order("created_at", desc=True).limit(1).execute().data
+    )
+    pet_name = pets[0]["name"] if pets else "your pet"
+    owner_name = (profile.get("full_name") or "").split(" ")[0] or "there"
+
     await ctx.whatsapp.send_text(
         phone,
-        "\U0001F389 You're all set! Ask me anything about your pet's health, or say \"book a vet\" to schedule a consultation.",
+        f"\U0001F389 You're all set, {owner_name}!\n\n"
+        "Everything on PetPulse is free, always:\n"
+        "🩺 Unlimited AI health chats and symptom checks\n"
+        "🚨 Full emergency triage and first-aid guidance\n"
+        f"🗂️ Unlimited document vault for {pet_name}'s records\n"
+        "🐾 Add as many pets as you like, all on one account\n"
+        "📍 Nearby vet finder with open-now filters\n"
+        "🌐 Chat in English or Hindi\n\n"
+        "The only paid part: booking a doctor consultation costs ₹399 per visit.\n\n"
+        f"Ask me anything about {pet_name}'s health, or say \"book a vet\" to schedule a consultation.",
     )
-    return True
-
-
-async def handle_subscription_webhook(ctx: AppContext, event_body: dict[str, Any]) -> bool:
-    """Razorpay's async confirmation of a Subscriber signup's lifecycle --
-    mirrors handle_payment_webhook's shape in app/agent/tools/booking.py.
-    Idempotent: an already-active row just gets updated to the same status
-    again, never double-notified (nothing is sent to the customer here at
-    all, only the subscriptions row's status changes)."""
-    parsed = razorpay_client.extract_subscription_event(event_body)
-    if not parsed:
-        return False
-    event, subscription_id, _reference_id = parsed
-
-    client = ctx.supabase
-    rows = client.table("subscriptions").select("*").eq("provider_subscription_id", subscription_id).limit(1).execute().data
-    if not rows:
-        logger.warning("Subscription webhook event=%s for unknown provider_subscription_id=%s", event, subscription_id)
-        return False
-    row = rows[0]
-
-    if event in ("subscription.activated", "subscription.charged"):
-        client.table("subscriptions").update({"status": "active"}).eq("id", row["id"]).execute()
-    elif event == "subscription.cancelled":
-        client.table("subscriptions").update(
-            {"status": "cancelled", "cancelled_at": datetime.now(tz=timezone.utc).isoformat()}
-        ).eq("id", row["id"]).execute()
-    else:
-        logger.info("Subscription webhook event=%s for subscription_id=%s: no state change needed", event, subscription_id)
     return True

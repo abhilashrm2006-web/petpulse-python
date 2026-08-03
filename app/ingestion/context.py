@@ -13,7 +13,7 @@ from typing import Any
 from supabase import Client
 
 from app.ingestion.webhook import ExtractedMessage
-from app.integrations.supabase_client import escape_or_filter_value, get_pets_for_profile, get_profile_by_phone, is_active_subscriber
+from app.integrations.supabase_client import escape_or_filter_value, get_pets_for_profile, get_profile_by_phone
 from app.utils.pet_resolution import resolve_active_pet_from_message
 
 ONBOARDING_REQUIRED_FIELDS = ["email", "city", "pet_name", "breed", "age", "weight", "dob"]
@@ -35,7 +35,6 @@ class AgentContext:
     onboarding: dict[str, Any] = field(default_factory=dict)
     pending_media: Any = None  # set post-construction to this turn's MediaResult (app.ingestion.media), if any
     awaiting_prescription_session: dict[str, Any] | None = None
-    is_subscriber: bool = False
     quoted_message_text: str | None = None
 
 
@@ -229,7 +228,6 @@ async def build_context(client: Client, extracted: ExtractedMessage) -> AgentCon
         )
 
     onboarding = compute_onboarding_status(profile, pets) if role != "vet" else {}
-    is_subscriber = await _to_thread(is_active_subscriber, client, profile["id"]) if role != "vet" else False
 
     return AgentContext(
         profile=profile,
@@ -245,7 +243,6 @@ async def build_context(client: Client, extracted: ExtractedMessage) -> AgentCon
         pending_negotiation=pending_negotiation,
         onboarding=onboarding,
         awaiting_prescription_session=awaiting_prescription_session,
-        is_subscriber=is_subscriber,
         quoted_message_text=quoted_message_text,
     )
 

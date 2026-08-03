@@ -72,16 +72,6 @@ class Settings(BaseSettings):
     razorpay_webhook_secret: str = ""
     razorpay_consult_fee_inr: int = 399
 
-    # Razorpay Subscriptions (Subscriber membership tier, ₹399/month — see
-    # app/ingestion/registration.py). Plan created once via the API; this is
-    # its id, not a per-customer value.
-    razorpay_subscription_plan_id: str = "plan_TIFJusQ5szdoE2"
-
-    # Founding Member cohort (₹99/month, first FOUNDING_MEMBER_CAP sign-ups --
-    # see app/agent/tools/subscriptions.py). Plan created once via the API,
-    # same as razorpay_subscription_plan_id above.
-    razorpay_founding_plan_id: str = "plan_TIObeBxQ0YnaEN"
-
     # Public origin this service is reachable at -- used to build shareable
     # links (e.g. GET /passport/{token}) that a vet/boarding facility can
     # open without logging in.

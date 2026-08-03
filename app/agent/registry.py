@@ -7,7 +7,7 @@ made by the same LLM loop."""
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from app.agent.tools import account, booking, documents, onboarding, pet_members, pet_parent_guide, subscriptions, symptoms, vets
+from app.agent.tools import account, booking, documents, onboarding, pet_members, pet_parent_guide, symptoms, vets
 
 
 @dataclass
@@ -17,10 +17,6 @@ class ToolSpec:
     parameters: dict[str, Any]
     fn: Callable
     roles: set[str]
-    # Gated on subscription tier, on top of role -- only ever enforced for
-    # role="customer" (see is_tool_allowed_for_tier); a vet is never
-    # restricted by a customer's subscription tier.
-    subscriber_only: bool = False
 
 
 def _spec(
@@ -30,7 +26,6 @@ def _spec(
     required: list[str],
     fn: Callable,
     roles: set[str],
-    subscriber_only: bool = False,
 ) -> ToolSpec:
     return ToolSpec(
         name=name,
@@ -38,7 +33,6 @@ def _spec(
         parameters={"type": "object", "properties": properties, "required": required},
         fn=fn,
         roles=roles,
-        subscriber_only=subscriber_only,
     )
 
 
@@ -70,8 +64,8 @@ TOOL_SPECS: list[ToolSpec] = [
         "check_symptoms",
         "Run a structured triage assessment (1-5 severity rating) on a NEW symptom or health concern — "
         "whether the customer typed it, or you noticed it yourself in a photo, video, or voice note. Always "
-        "call this before giving your own clinical read, for any modality. Available to Free and Subscriber "
-        "customers alike — only booking an actual consultation is Subscriber-gated.",
+        "call this before giving your own clinical read, for any modality. Free and unlimited for every "
+        "customer — only booking an actual consultation afterward costs a fee.",
         {
             "pet_id": _STR, "pet_name": _STR, "species": _STR,
             "symptoms": {
@@ -88,13 +82,13 @@ TOOL_SPECS: list[ToolSpec] = [
     _spec(
         "find_nearby_vets",
         "Find nearby vet clinics. Use shared location-pin coordinates if available in context, else pass "
-        "location_text from what the customer said. Free customers get name/address/distance only; "
-        "Subscribers can additionally pass open_now/emergency_24h/category to filter results.",
+        "location_text from what the customer said. Pass open_now/emergency_24h/category to filter results "
+        "whenever the customer asks for that.",
         {
             "location_text": _STR, "latitude": _NUM_OR_NULL, "longitude": _NUM_OR_NULL,
-            "open_now": {"type": "boolean", "description": "Subscriber-only filter; ignored for Free customers."},
-            "emergency_24h": {"type": "boolean", "description": "Subscriber-only filter; ignored for Free customers."},
-            "category": {"type": "string", "description": "Subscriber-only filter: clinic|hospital|pharmacy. Ignored for Free customers."},
+            "open_now": {"type": "boolean", "description": "Only show clinics open right now (24/7 clinics only, per data limits)."},
+            "emergency_24h": {"type": "boolean", "description": "Only show 24/7 emergency clinics."},
+            "category": {"type": "string", "description": "Filter by type: clinic|hospital|pharmacy."},
         },
         [],
         vets.find_nearby_vets,
@@ -113,9 +107,8 @@ TOOL_SPECS: list[ToolSpec] = [
     ),
     _spec(
         "get_pet_passport",
-        "Build and return a health-passport summary for a pet. Free customers get a trimmed due-date-only "
-        "list; Subscribers get the full passport (vaccinations incl. manufacturer/batch-lot number, recent "
-        "records) plus a shareable public link and certificate attachments. On error=\"ambiguous_pet\" with "
+        "Build and return the full health-passport summary for a pet (vaccinations incl. manufacturer/"
+        "batch-lot number, recent records) plus certificate attachments. On error=\"ambiguous_pet\" with "
         "`candidates`, disambiguate using each candidate's owner_name/owner_phone and conversation context, "
         "then re-call with the exact pet_id.",
         {
@@ -135,8 +128,7 @@ TOOL_SPECS: list[ToolSpec] = [
         "prompt's document-filing rule applies to what was just uploaded. A vet's patients can span multiple "
         "unrelated owners — if the pet name given matches more than one (error=\"ambiguous_pet\" with "
         "`candidates`), use each candidate's owner_name/owner_phone plus who the message named to pick the "
-        "right one, then call again with its exact pet_id instead of pet_name. Never file to a guessed pet. "
-        "Free customers are capped at 5 documents total across all their pets.",
+        "right one, then call again with its exact pet_id instead of pet_name. Never file to a guessed pet.",
         {
             "pet_id": _STR,
             "pet_name": _STR,
@@ -148,24 +140,22 @@ TOOL_SPECS: list[ToolSpec] = [
     ),
     _spec(
         "search_documents",
-        "Full-text search across a Subscriber's filed documents (prescriptions, X-rays, lab reports) by "
+        "Full-text search across a customer's filed documents (prescriptions, X-rays, lab reports) by "
         "keyword — searches document text/summary/type across all their pets unless a specific pet is given.",
         {"query": _STR, "pet_id": _STR, "pet_name": _STR},
         ["query"],
         documents.search_documents,
         CUSTOMER,
-        subscriber_only=True,
     ),
     _spec(
         "get_shareable_link",
         "Generate (or return the existing) public, no-login-required link to a pet's health summary — "
         "vaccination passport plus recent records — that a vet or boarding facility can open directly. "
-        "Subscriber-only, one link per pet, stable across calls.",
+        "One link per pet, stable across calls.",
         {"pet_id": _STR, "pet_name": _STR},
         [],
         documents.get_shareable_link,
         CUSTOMER,
-        subscriber_only=True,
     ),
     _spec(
         "start_new_pet_parent_guide",
@@ -199,7 +189,6 @@ TOOL_SPECS: list[ToolSpec] = [
         ["case_summary"],
         booking.request_doctor_session,
         CUSTOMER,
-        subscriber_only=True,
     ),
     _spec(
         "select_doctor",
@@ -208,18 +197,15 @@ TOOL_SPECS: list[ToolSpec] = [
         ["session_id", "doctor_phone"],
         booking.select_doctor,
         CUSTOMER,
-        subscriber_only=True,
     ),
     _spec(
         "book_slot",
-        "Customer picked a specific time slot — finalize the booking (with a fresh double-booking check). "
-        "For a Subscriber this is free (included in their membership, 1/month) unless their monthly "
-        "consultation is already used, in which case it falls back to a paid link automatically.",
+        "Customer picked a specific time slot — finalize the booking (with a fresh double-booking check), "
+        "and send a ₹399 consultation-fee payment link.",
         {"session_id": _STR, "slot_start": {"type": "string", "description": "ISO 8601 timestamp."}, "doctor_phone": _STR},
         ["session_id", "slot_start"],
         booking.book_slot,
         CUSTOMER,
-        subscriber_only=True,
     ),
     _spec(
         "propose_time",
@@ -356,16 +342,6 @@ TOOL_SPECS: list[ToolSpec] = [
         CUSTOMER,
     ),
     _spec(
-        "start_subscription",
-        "Start a PetPulse Subscriber signup (₹399/month) for the customer — sends them a Razorpay link. Call "
-        "this whenever they ask to subscribe/upgrade, including right after a subscriber_only_feature message "
-        "if they say they want to. Never subscriber-gated itself — it's how a Free customer becomes one.",
-        {},
-        [],
-        subscriptions.start_subscription,
-        CUSTOMER,
-    ),
-    _spec(
         "request_data_deletion",
         "Customer asked to delete/clear/reset their profile, chat, or data — sends a Yes/No confirmation "
         "over WhatsApp before anything happens. Never delete or clear anything yourself without this "
@@ -417,15 +393,3 @@ def get_tool_fn(name: str) -> Callable | None:
 def is_tool_allowed_for_role(name: str, role: str) -> bool:
     spec = _BY_NAME.get(name)
     return bool(spec and role in spec.roles)
-
-
-def is_tool_allowed_for_tier(name: str, role: str, is_subscriber: bool) -> bool:
-    """Tier gating only ever applies to customer-initiated calls -- a vet
-    is never restricted by a customer's subscription tier (e.g. filing a
-    document for a Free customer still works)."""
-    if role != "customer":
-        return True
-    spec = _BY_NAME.get(name)
-    if not spec or not spec.subscriber_only:
-        return True
-    return is_subscriber
