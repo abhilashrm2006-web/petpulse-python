@@ -144,6 +144,96 @@ async def test_pet_name_step_creates_pet_and_asks_city():
     assert "city" in ctx.whatsapp.send_text.call_args.args[1].lower()
 
 
+# --- onboarding_events instrumentation ----------------------------------
+
+@pytest.mark.asyncio
+async def test_accepted_customer_name_logs_an_onboarding_event():
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    await handle_registration(ctx, _msg(text="Anudeep Reddy"))
+
+    events = supabase.rows("onboarding_events")
+    assert len(events) == 1
+    assert events[0]["registration_step"] == "awaiting_customer_name"
+    assert events[0]["validator_result"] == "accepted"
+    assert events[0]["raw_input"] == "Anudeep Reddy"
+    assert events[0]["rejection_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_customer_name_logs_an_onboarding_event_with_a_reason():
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    await handle_registration(ctx, _msg(text="Sorry im a veterinarian"))
+
+    events = supabase.rows("onboarding_events")
+    assert len(events) == 1
+    assert events[0]["registration_step"] == "awaiting_customer_name"
+    assert events[0]["validator_result"] == "rejected"
+    assert events[0]["rejection_reason"] == "not_name_like"
+
+
+@pytest.mark.asyncio
+async def test_pet_name_step_logs_accepted_and_rejected_events():
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_pet_name")]})
+    ctx = _make_ctx(supabase)
+
+    await handle_registration(ctx, _msg(text="So many we have 12 dogs"))
+    await handle_registration(ctx, _msg(text="Bobby"))
+
+    events = supabase.rows("onboarding_events")
+    assert len(events) == 2
+    assert events[0]["registration_step"] == "awaiting_pet_name"
+    assert events[0]["validator_result"] == "rejected"
+    assert events[1]["validator_result"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_missing_onboarding_events_table_never_breaks_registration():
+    """Logging is best-effort observability, not load-bearing -- if the
+    onboarding_events table doesn't exist yet (e.g. migration not applied),
+    the actual registration step must still succeed."""
+    from app.ingestion.registration import _log_onboarding_event
+
+    class _BoomClient:
+        def table(self, name):
+            if name == "onboarding_events":
+                raise Exception('relation "onboarding_events" does not exist')
+            raise AssertionError(f"unexpected table access: {name}")
+
+    try:
+        _log_onboarding_event(_BoomClient(), "profile-1", "awaiting_customer_name", "Anudeep Reddy", accepted=True)
+    except Exception:
+        pytest.fail("_log_onboarding_event must swallow its own exceptions")
+
+
+@pytest.mark.asyncio
+async def test_handle_registration_succeeds_even_if_event_logging_fails():
+    """End-to-end: the actual wizard step (saving the name, advancing
+    registration_step, replying) must complete normally even when
+    onboarding_events logging is broken."""
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    real_table = supabase.table
+
+    def _table(name):
+        if name == "onboarding_events":
+            raise Exception('relation "onboarding_events" does not exist')
+        return real_table(name)
+
+    supabase.table = _table
+
+    handled = await handle_registration(ctx, _msg(text="Anudeep Reddy"))
+
+    assert handled is True
+    profile = supabase.rows("profiles")[0]
+    assert profile["full_name"] == "Anudeep Reddy"
+    assert profile["registration_step"] == "awaiting_pet_name"
+
+
 @pytest.mark.asyncio
 async def test_pet_name_step_survives_a_db_trigger_already_creating_pet_members():
     supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_pet_name")]})

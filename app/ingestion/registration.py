@@ -19,6 +19,31 @@ from app.integrations.supabase_client import get_profile_by_phone, is_unique_vio
 logger = logging.getLogger(__name__)
 
 
+def _log_onboarding_event(
+    client, profile_id: str, step: str, raw_input: str, accepted: bool, reason: str | None = None
+) -> None:
+    """Best-effort instrumentation for the two steps that previously had no
+    message-level visibility at all (see 2026-08-04 root-cause CSV): lets us
+    finally tell "replied and got rejected by the validator" apart from
+    "never replied," and surfaces a per-step rejection-rate metric (see
+    app/admin/routes.py onboarding_event_summary). Wrapped in try/except so
+    a missing onboarding_events table (e.g. before the migration has been
+    applied) never breaks the actual registration flow -- this is
+    observability, not a load-bearing part of the wizard."""
+    try:
+        client.table("onboarding_events").insert(
+            {
+                "profile_id": profile_id,
+                "registration_step": step,
+                "raw_input": raw_input,
+                "validator_result": "accepted" if accepted else "rejected",
+                "rejection_reason": reason,
+            }
+        ).execute()
+    except Exception:
+        logger.exception("Failed to log onboarding_event for profile=%s step=%s", profile_id, step)
+
+
 def _looks_like_name(text: str) -> bool:
     """Real names are short and don't read like a sentence. Confirmed live
     (2026-07-31): customers who type a complaint/question/off-topic remark at
@@ -89,8 +114,10 @@ async def _handle_customer_name(ctx: AppContext, profile: dict[str, Any], extrac
     phone = profile["phone_number"]
     name = (extracted.text or "").strip()
     if not _looks_like_name(name):
+        _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_customer_name", name, accepted=False, reason="not_name_like")
         await ctx.whatsapp.send_text(phone, "Sorry, I didn't quite get that -- please just type your full name (e.g. Priya Sharma).")
         return True
+    _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_customer_name", name, accepted=True)
     ctx.supabase.table("profiles").update({"full_name": name, "registration_step": "awaiting_pet_name"}).eq("id", profile["id"]).execute()
     await ctx.whatsapp.send_text(phone, f"Nice to meet you, {name}! What's your pet's name?")
     return True
@@ -100,8 +127,10 @@ async def _handle_pet_name(ctx: AppContext, profile: dict[str, Any], extracted: 
     phone = profile["phone_number"]
     name = (extracted.text or "").strip()
     if not _looks_like_name(name):
+        _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_pet_name", name, accepted=False, reason="not_name_like")
         await ctx.whatsapp.send_text(phone, "Sorry, I didn't quite get that -- please just type your pet's name (e.g. Bruno).")
         return True
+    _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_pet_name", name, accepted=True)
     client = ctx.supabase
     pet = client.table("pets").insert({"profile_id": profile["id"], "name": name, "species": "Other"}).execute().data[0]
     try:
@@ -123,8 +152,10 @@ async def _handle_city(ctx: AppContext, profile: dict[str, Any], extracted: Extr
     phone = profile["phone_number"]
     city = (extracted.text or "").strip()
     if not city:
+        _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_city", city, accepted=False, reason="empty")
         await ctx.whatsapp.send_text(phone, "Please type your city.")
         return True
+    _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_city", city, accepted=True)
     ctx.supabase.table("profiles").update({"city": city, "registration_step": "completed"}).eq("id", profile["id"]).execute()
 
     pets = (

@@ -12,6 +12,15 @@ class Settings(BaseSettings):
     whatsapp_verify_token: str = "petpulse_wh_9f3a7c2e1b6d4581"
     whatsapp_app_secret: str = ""
     whatsapp_api_version: str = "v21.0"
+    # Name of the Meta-approved WhatsApp template used for one-off outreach
+    # (e.g. scripts/reengage_stranded_onboarding.py) sent outside the 24h
+    # customer-service session window, where free-form text isn't reliably
+    # deliverable. Empty until a template is actually created and approved
+    # in Meta Business Manager -- scripts that need it must refuse to send
+    # live (dry-run only) while this is unset, not silently fall back to
+    # free-form text.
+    whatsapp_reengagement_template_name: str = ""
+    whatsapp_reengagement_template_language: str = "en"
 
     # OpenAI
     openai_api_key: str = ""

@@ -60,6 +60,32 @@ class WhatsAppClient:
     async def send_text(self, to: str, body: str) -> dict:
         return await self._post({"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": body}})
 
+    async def send_template(self, to: str, template_name: str, language_code: str, body_params: list[str]) -> dict:
+        """Sends a pre-approved WhatsApp message template -- the only
+        reliably deliverable message type outside the 24h customer-service
+        session window (a free-form send_text can fail there per WhatsApp
+        policy, even though it isn't always rejected in practice). Each
+        entry in body_params fills the template's {{1}}, {{2}}, ... body
+        placeholders in order; the template itself is configured/approved
+        in Meta Business Manager, not defined here."""
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "template",
+                "template": {
+                    "name": template_name,
+                    "language": {"code": language_code},
+                    "components": [
+                        {
+                            "type": "body",
+                            "parameters": [{"type": "text", "text": p} for p in body_params],
+                        }
+                    ],
+                },
+            }
+        )
+
     async def send_reply_and_chunk(self, to: str, text: str) -> list[tuple[str, str]]:
         """Formats + chunks a long agent reply and sends each chunk with a
         throttling delay, matching `Format WhatsApp Response` -> `Split

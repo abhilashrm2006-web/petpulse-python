@@ -1396,3 +1396,114 @@ async def analytics_pnl(request: Request, date_from: str = "", date_to: str = ""
         "net_in_range_inr_approx": round(revenue_in_range_inr - total_costs_inr_approx, 2),
         "fx_rate_used": USD_TO_INR_APPROX,
     }
+
+
+# ---------------------------------------------------------------------------
+# Onboarding instrumentation (2026-08-04 re-engagement workstream, item 2) --
+# per-step accept/reject counts from onboarding_events, so we can see
+# whether a specific question is failing users repeatedly (high rejection
+# rate) vs. them just going silent (few events logged relative to how many
+# profiles are parked at that step).
+# ---------------------------------------------------------------------------
+
+@router.get("/onboarding-events/summary")
+async def onboarding_event_summary(request: Request, date_from: str = "", date_to: str = "") -> dict[str, Any]:
+    ctx = _ctx(request)
+    client = ctx.supabase
+    range_start, range_end = _resolve_range(date_from, date_to)
+    range_end_ts = f"{range_end}T23:59:59"
+
+    events = (
+        client.table("onboarding_events").select("registration_step,validator_result,rejection_reason")
+        .gte("created_at", range_start).lte("created_at", range_end_ts).execute().data or []
+    )
+
+    by_step: dict[str, dict[str, Any]] = {}
+    for e in events:
+        step = e.get("registration_step") or "unknown"
+        entry = by_step.setdefault(step, {"registration_step": step, "accepted": 0, "rejected": 0, "rejection_reasons": {}})
+        if e.get("validator_result") == "rejected":
+            entry["rejected"] += 1
+            reason = e.get("rejection_reason") or "unknown"
+            entry["rejection_reasons"][reason] = entry["rejection_reasons"].get(reason, 0) + 1
+        else:
+            entry["accepted"] += 1
+
+    rows = []
+    for entry in by_step.values():
+        total = entry["accepted"] + entry["rejected"]
+        rows.append(
+            {
+                **entry,
+                "total_events": total,
+                "rejection_rate": round(entry["rejected"] / total, 3) if total else 0,
+                "rejection_reasons": [{"reason": r, "count": c} for r, c in sorted(entry["rejection_reasons"].items(), key=lambda kv: -kv[1])],
+            }
+        )
+    rows.sort(key=lambda r: -r["rejection_rate"])
+
+    return {"date_from": range_start, "date_to": range_end, "by_step": rows}
+
+
+# ---------------------------------------------------------------------------
+# Emergency-escalation human check-in queue (2026-08-04 re-engagement
+# workstream, item 4) -- health_logs rows flagged by
+# app.scheduler.jobs.flag_emergency_checkins because a RED/emergency
+# check_symptoms result got no customer follow-up within the review window.
+# Deliberately a manual queue, not another automated send.
+# ---------------------------------------------------------------------------
+
+@router.get("/human-checkin-queue")
+async def human_checkin_queue(request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    client = ctx.supabase
+
+    rows = (
+        client.table("health_logs")
+        .select("id,pet_id,profile_id,ai_risk_score,ai_observation,symptoms,created_at,human_checkin_flagged_at")
+        .eq("needs_human_checkin", True)
+        .is_("human_checkin_resolved_at", "null")
+        .order("human_checkin_flagged_at", desc=False)
+        .execute()
+        .data
+        or []
+    )
+
+    pet_ids = [r["pet_id"] for r in rows if r.get("pet_id")]
+    profile_ids = [r["profile_id"] for r in rows if r.get("profile_id")]
+    pets_by_id = {
+        p["id"]: p for p in (client.table("pets").select("id,name,species").in_("id", pet_ids).execute().data or [])
+    } if pet_ids else {}
+    profiles_by_id = {
+        p["id"]: p for p in (client.table("profiles").select("id,full_name,phone_number").in_("id", profile_ids).execute().data or [])
+    } if profile_ids else {}
+
+    queue = []
+    for r in rows:
+        pet = pets_by_id.get(r.get("pet_id"), {})
+        profile = profiles_by_id.get(r.get("profile_id"), {})
+        queue.append(
+            {
+                "health_log_id": r["id"],
+                "pet_name": pet.get("name"),
+                "species": pet.get("species"),
+                "customer_name": profile.get("full_name"),
+                "phone_number": profile.get("phone_number"),
+                "symptom_summary": r.get("symptoms"),
+                "ai_observation": r.get("ai_observation"),
+                "ai_risk_score": r.get("ai_risk_score"),
+                "escalation_at": r["created_at"],
+                "flagged_at": r.get("human_checkin_flagged_at"),
+            }
+        )
+
+    return {"count": len(queue), "queue": queue}
+
+
+@router.post("/human-checkin-queue/{health_log_id}/resolve")
+async def resolve_human_checkin(health_log_id: str, request: Request) -> dict[str, Any]:
+    ctx = _ctx(request)
+    ctx.supabase.table("health_logs").update(
+        {"human_checkin_resolved_at": datetime.now(tz=timezone.utc).isoformat()}
+    ).eq("id", health_log_id).execute()
+    return {"success": True}

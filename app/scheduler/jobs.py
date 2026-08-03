@@ -22,6 +22,14 @@ DOCTOR_DRIVE_SYNC_MIME_ALLOWLIST = {"application/pdf", "image/jpeg", "image/png"
 
 REENGAGEMENT_SILENCE_THRESHOLD = timedelta(hours=48)
 REENGAGEMENT_COOLDOWN = timedelta(days=7)
+# A health_logs row with ai_risk_score >= 80 is a check_symptoms severity 4-5
+# (RED) result -- see app/agent/tools/symptoms.py's SEVERITY_COLOR mapping
+# (ai_risk_score = severity * 20). This job flags one for a human check-in
+# only if the customer never sent a single follow-up message within this
+# window -- a real emergency deserves a manual look, not the automated
+# re-engagement pipeline.
+EMERGENCY_ESCALATION_RISK_THRESHOLD = 80
+EMERGENCY_CHECKIN_REVIEW_WINDOW = timedelta(hours=48)
 ONBOARDING_STUCK_THRESHOLD = timedelta(hours=24)
 ONBOARDING_REMINDER_COOLDOWN = timedelta(days=1)
 # How many profiles' "last active" lookup to run concurrently -- one query per
@@ -642,3 +650,58 @@ async def rate_customer_intents(ctx: AppContext) -> None:
                 "intent_rating_message_count": len(msgs),
             }
         ).eq("id", profile_id).execute()
+
+
+async def flag_emergency_checkins(ctx: AppContext) -> None:
+    """Item 4 of the 2026-08-04 re-engagement workstream: finds RED/
+    emergency check_symptoms escalations (health_logs rows with
+    ai_risk_score >= 80) where the customer never sent a single follow-up
+    message within EMERGENCY_CHECKIN_REVIEW_WINDOW, and flags them
+    (needs_human_checkin=true) for a person to manually check in on --
+    see app/admin/routes.py's /admin/human-checkin-queue for where these
+    surface. Deliberately routed to a human queue, not the automated
+    broadcast/nudge jobs: a possible real emergency isn't something a
+    templated "haven't heard from you" message is an adequate response to."""
+    client = ctx.supabase
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - EMERGENCY_CHECKIN_REVIEW_WINDOW
+
+    try:
+        candidates = (
+            client.table("health_logs")
+            .select("id,pet_id,profile_id,created_at")
+            .gte("ai_risk_score", EMERGENCY_ESCALATION_RISK_THRESHOLD)
+            .eq("needs_human_checkin", False)
+            .is_("human_checkin_flagged_at", "null")
+            .lte("created_at", cutoff.isoformat())
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        # needs_human_checkin/human_checkin_flagged_at don't exist until the
+        # 2026_08_04_reengagement_workstream.sql migration has been applied
+        # -- skip this run rather than error-loop every 6h until it lands.
+        logger.warning("flag_emergency_checkins: health_logs check-in columns not found (migration not yet applied?)")
+        return
+
+    for log in candidates:
+        profile_id = log.get("profile_id")
+        if not profile_id:
+            continue
+        followups = (
+            client.table("messages")
+            .select("id")
+            .eq("profile_id", profile_id)
+            .eq("sender_type", "user")
+            .gt("created_at", log["created_at"])
+            .limit(1)
+            .execute()
+            .data
+        )
+        if followups:
+            continue  # customer DID follow up -- not a silent emergency drop-off
+
+        client.table("health_logs").update(
+            {"needs_human_checkin": True, "human_checkin_flagged_at": now.isoformat()}
+        ).eq("id", log["id"]).execute()

@@ -7,6 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.deps import AppContext
 from app.scheduler.jobs import (
+    flag_emergency_checkins,
     rate_customer_intents,
     retain_chat_history,
     send_doctor_schedule_reminders,
@@ -49,6 +50,10 @@ def start_scheduler(ctx: AppContext) -> AsyncIOScheduler:
     scheduler.add_job(
         send_doctor_schedule_reminders, CronTrigger(hour=7, minute=0), args=[ctx, "day_of"], id="doctor_schedule_day_of"
     )
+    # Every 6 hours -- EMERGENCY_CHECKIN_REVIEW_WINDOW (48h) is hour-granular,
+    # same reasoning as reengagement_nudges above; a possible real emergency
+    # shouldn't sit unflagged for up to a day's slack past the threshold.
+    scheduler.add_job(flag_emergency_checkins, CronTrigger(hour="*/6", minute=5), args=[ctx], id="emergency_checkin_flags")
 
     scheduler.start()
     return scheduler
