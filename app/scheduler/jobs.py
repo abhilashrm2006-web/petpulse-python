@@ -246,11 +246,18 @@ async def send_new_parent_followups(ctx: AppContext) -> None:
 
 def _reengagement_text(profile: dict) -> str:
     name = profile.get("full_name")
-    greeting = f"Hey {name.split()[0]}!" if name else "Hey there!"
+    greeting = f"Hey {name.split()[0]}! \U0001F44B" if name else "Hey there! \U0001F44B"
     return (
-        f"{greeting} Haven't heard from you in a couple of days — just checking in. "
-        "Anything going on with your pet I can help with, or any questions on your mind? "
-        "I'm here 24/7 whenever you need me 🐾"
+        f"{greeting}\n\n"
+        "We noticed you haven't been around PetPulse in a while, and we'd love to know why.\n\n"
+        "Did something not work as expected? Was a feature missing, confusing, or just not useful "
+        "for you and your pet? Whatever it is, we want to hear it — good or bad.\n\n"
+        "Just reply here and let us know. We'll personally look into it and get back to you, so "
+        "PetPulse actually works the way you need it to.\n\n"
+        "And in case you missed it — everything on PetPulse is now free: unlimited AI health chats, "
+        "emergency triage, document vault, multiple pets, vet finder, all of it. The only paid part "
+        "is booking a doctor consultation (₹399/visit).\n\n"
+        "We'd hate for you to miss out. What can we fix? \U0001F43E tell us on 9742228305."
     )
 
 
