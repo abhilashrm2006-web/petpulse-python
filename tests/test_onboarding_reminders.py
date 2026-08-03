@@ -29,7 +29,7 @@ async def test_reminds_a_customer_stuck_onboarding_for_over_24_hours():
             "profiles": [
                 {
                     "id": "p1", "role": "customer", "phone_number": "919000000001", "full_name": "Jane Doe",
-                    "registration_step": "awaiting_pet_weight", "last_active_at": _hours_ago(30),
+                    "registration_step": "awaiting_pet_name", "last_active_at": _hours_ago(30),
                 }
             ],
         }
@@ -51,7 +51,7 @@ async def test_does_not_remind_a_customer_active_within_24_hours():
             "profiles": [
                 {
                     "id": "p1", "role": "customer", "phone_number": "919000000001", "full_name": "Jane",
-                    "registration_step": "awaiting_pet_weight", "last_active_at": _hours_ago(2),
+                    "registration_step": "awaiting_pet_name", "last_active_at": _hours_ago(2),
                 }
             ],
         }

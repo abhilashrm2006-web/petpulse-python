@@ -78,7 +78,7 @@ async def test_list_customers_reports_onboarding_incomplete_stage():
             "profiles": [
                 {
                     "id": "c1", "role": "customer", "full_name": "Jane", "phone_number": "919000000001",
-                    "created_at": "2026-01-01", "registration_step": "awaiting_pet_weight",
+                    "created_at": "2026-01-01", "registration_step": "awaiting_pet_name",
                 },
             ],
         }
@@ -89,7 +89,7 @@ async def test_list_customers_reports_onboarding_incomplete_stage():
 
     customer = result["customers"][0]
     assert customer["stage_code"] == "onboarding"
-    assert "pet's weight" in customer["stage_detail"]
+    assert "pet's name" in customer["stage_detail"]
 
 
 @pytest.mark.asyncio

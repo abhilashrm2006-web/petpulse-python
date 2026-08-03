@@ -110,21 +110,9 @@ def _subscription_category(profile: dict[str, Any], subscription: dict[str, Any]
 
 
 REGISTRATION_STEP_LABELS = {
-    "awaiting_member_type": "choosing new vs. existing member",
     "awaiting_customer_name": "entering their name",
     "awaiting_pet_name": "entering their pet's name",
-    "awaiting_pet_dob": "entering their pet's date of birth",
-    "awaiting_pet_age": "entering their pet's age",
-    "awaiting_pet_weight": "entering their pet's weight",
-    "awaiting_kci_status": "answering the KCI certificate question",
-    "awaiting_vaccination_status": "answering the vaccination status question",
-    "awaiting_microchip_status": "answering the microchip question",
-    "awaiting_microchip_number": "entering their pet's microchip number",
     "awaiting_city": "entering their city",
-    "awaiting_tier_choice": "choosing a plan",
-    "awaiting_free_subchoice": "choosing a free-plan option",
-    "awaiting_existing_phone": "verifying their existing-member phone number",
-    "awaiting_existing_verify": "verifying their identity as an existing member",
 }
 
 
