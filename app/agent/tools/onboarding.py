@@ -3,7 +3,7 @@
 
 import math
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from app.deps import AppContext
@@ -27,6 +27,14 @@ CANONICAL_SPECIES = ["Dog", "Cat", "Rabbit", "Fish", "Bird", "Hamster", "Guinea 
 GENDER_SYNONYMS = {
     "male": "Male", "m": "Male", "boy": "Male", "he": "Male", "him": "Male",
     "female": "Female", "f": "Female", "girl": "Female", "she": "Female", "her": "Female",
+}
+
+# "N years old" / "N yrs" / "N.N years" -> approximate DOB (spec item #6:
+# owners frequently don't know an exact birth date, only an approximate age).
+AGE_PHRASE_PATTERN = re.compile(r"([\d.]+)\s*(?:years?|yrs?)\b", re.IGNORECASE)
+MONTH_NAMES = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
 }
 
 PROFILE_FIELDS = {"email", "city", "full_name"}
@@ -61,11 +69,29 @@ def _normalize_value(field: str, value: str) -> Any:
         try:
             return datetime.fromisoformat(value).date().isoformat()
         except ValueError:
-            match = re.match(r"^(\d{1,2})/(\d{4})$", value)
-            if match:
-                month, year = match.groups()
-                return f"{year}-{int(month):02d}-01"
-            return None
+            pass
+        match = re.match(r"^(\d{1,2})/(\d{4})$", value)
+        if match:
+            month, year = match.groups()
+            return f"{year}-{int(month):02d}-01"
+        age_match = AGE_PHRASE_PATTERN.search(value)
+        if age_match:
+            # Best-effort, not exact -- an owner saying "2 years old" or "3.5
+            # yrs" doesn't know the real birth date either, so an approximate
+            # DOB derived from today minus that many years is at least as
+            # accurate as what they actually know.
+            years = float(age_match.group(1))
+            return (date.today() - timedelta(days=round(years * 365.25))).isoformat()
+        lowered = value.lower()
+        for name, month_num in MONTH_NAMES.items():
+            if name in lowered:
+                # Nearest PAST occurrence of that month -- "born last April"
+                # said in any month from April onward this year means this
+                # year's April; said before April means last year's.
+                today = date.today()
+                year = today.year if today.month >= month_num else today.year - 1
+                return date(year, month_num, 1).isoformat()
+        return None
     if field == "species":
         return SPECIES_SYNONYMS.get(value.lower(), value.title() if value.title() in CANONICAL_SPECIES else "Other")
     if field == "gender":

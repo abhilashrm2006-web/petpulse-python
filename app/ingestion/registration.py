@@ -12,11 +12,38 @@ immediately and the existing agent pipeline runs completely unchanged.
 import logging
 from typing import Any
 
+from app.agent.conversation_log import log_conversation_turn
 from app.deps import AppContext
 from app.ingestion.webhook import ExtractedMessage
 from app.integrations.supabase_client import get_profile_by_phone, is_unique_violation
 
 logger = logging.getLogger(__name__)
+
+
+def _log_step_transition(client, profile_id: str, from_step: str | None, to_step: str | None) -> None:
+    """Best-effort audit trail of every registration_step change -- unlike
+    profiles.registration_step (overwritten in place), this is append-only,
+    so time-to-abandon per step can be measured directly instead of
+    inferred from last_active_at being blank (2026-08 root-cause item #2)."""
+    try:
+        client.table("registration_step_history").insert(
+            {"profile_id": profile_id, "from_step": from_step, "to_step": to_step}
+        ).execute()
+    except Exception:
+        logger.exception("Failed to log registration_step_history for profile=%s", profile_id)
+
+
+def _log_turn(client, profile: dict[str, Any], extracted: ExtractedMessage, outbound_texts: list[str]) -> None:
+    log_conversation_turn(
+        client,
+        profile_id=profile["id"],
+        pet_id=None,
+        sender_type="user",
+        inbound_text=extracted.text,
+        inbound_message_type=extracted.message_type,
+        inbound_wamid=extracted.message_id,
+        outbound_texts_with_wamid=[(None, text) for text in outbound_texts],
+    )
 
 
 def _log_onboarding_event(
@@ -86,12 +113,15 @@ async def handle_registration(ctx: AppContext, extracted: ExtractedMessage) -> b
             .execute()
             .data[0]
         )
-        await ctx.whatsapp.send_text(
-            phone,
+        greeting = (
             "Hi this is Pulsy, welcome to PetPulse \U0001F43E\n"
-            "नमस्ते! मैं Pulsy हूं, PetPulse में आपका स्वागत है \U0001F43E",
+            "नमस्ते! मैं Pulsy हूं, PetPulse में आपका स्वागत है \U0001F43E"
         )
-        await ctx.whatsapp.send_text(phone, "What's your full name?")
+        name_prompt = "What's your full name?"
+        await ctx.whatsapp.send_text(phone, greeting)
+        await ctx.whatsapp.send_text(phone, name_prompt)
+        _log_step_transition(client, profile["id"], None, "awaiting_customer_name")
+        _log_turn(client, profile, extracted, [greeting, name_prompt])
         return True
 
     step = profile.get("registration_step")
@@ -111,27 +141,35 @@ async def handle_registration(ctx: AppContext, extracted: ExtractedMessage) -> b
 
 
 async def _handle_customer_name(ctx: AppContext, profile: dict[str, Any], extracted: ExtractedMessage) -> bool:
+    client = ctx.supabase
     phone = profile["phone_number"]
     name = (extracted.text or "").strip()
     if not _looks_like_name(name):
-        _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_customer_name", name, accepted=False, reason="not_name_like")
-        await ctx.whatsapp.send_text(phone, "Sorry, I didn't quite get that -- please just type your full name (e.g. Priya Sharma).")
+        _log_onboarding_event(client, profile["id"], "awaiting_customer_name", name, accepted=False, reason="not_name_like")
+        reply = "Sorry, I didn't quite get that -- please just type your full name (e.g. Priya Sharma)."
+        await ctx.whatsapp.send_text(phone, reply)
+        _log_turn(client, profile, extracted, [reply])
         return True
-    _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_customer_name", name, accepted=True)
-    ctx.supabase.table("profiles").update({"full_name": name, "registration_step": "awaiting_pet_name"}).eq("id", profile["id"]).execute()
-    await ctx.whatsapp.send_text(phone, f"Nice to meet you, {name}! What's your pet's name?")
+    _log_onboarding_event(client, profile["id"], "awaiting_customer_name", name, accepted=True)
+    client.table("profiles").update({"full_name": name, "registration_step": "awaiting_pet_name"}).eq("id", profile["id"]).execute()
+    _log_step_transition(client, profile["id"], "awaiting_customer_name", "awaiting_pet_name")
+    reply = f"Nice to meet you, {name}! What's your pet's name?"
+    await ctx.whatsapp.send_text(phone, reply)
+    _log_turn(client, profile, extracted, [reply])
     return True
 
 
 async def _handle_pet_name(ctx: AppContext, profile: dict[str, Any], extracted: ExtractedMessage) -> bool:
+    client = ctx.supabase
     phone = profile["phone_number"]
     name = (extracted.text or "").strip()
     if not _looks_like_name(name):
-        _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_pet_name", name, accepted=False, reason="not_name_like")
-        await ctx.whatsapp.send_text(phone, "Sorry, I didn't quite get that -- please just type your pet's name (e.g. Bruno).")
+        _log_onboarding_event(client, profile["id"], "awaiting_pet_name", name, accepted=False, reason="not_name_like")
+        reply = "Sorry, I didn't quite get that -- please just type your pet's name (e.g. Bruno)."
+        await ctx.whatsapp.send_text(phone, reply)
+        _log_turn(client, profile, extracted, [reply])
         return True
-    _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_pet_name", name, accepted=True)
-    client = ctx.supabase
+    _log_onboarding_event(client, profile["id"], "awaiting_pet_name", name, accepted=True)
     pet = client.table("pets").insert({"profile_id": profile["id"], "name": name, "species": "Other"}).execute().data[0]
     try:
         client.table("pet_members").insert(
@@ -144,29 +182,35 @@ async def _handle_pet_name(ctx: AppContext, profile: dict[str, Any], extracted: 
         if not is_unique_violation(exc):
             raise
     client.table("profiles").update({"registration_step": "awaiting_city"}).eq("id", profile["id"]).execute()
-    await ctx.whatsapp.send_text(phone, "Last question — what city are you in?")
+    _log_step_transition(client, profile["id"], "awaiting_pet_name", "awaiting_city")
+    reply = "Last question — what city are you in?"
+    await ctx.whatsapp.send_text(phone, reply)
+    _log_turn(client, profile, extracted, [reply])
     return True
 
 
 async def _handle_city(ctx: AppContext, profile: dict[str, Any], extracted: ExtractedMessage) -> bool:
+    client = ctx.supabase
     phone = profile["phone_number"]
     city = (extracted.text or "").strip()
     if not city:
-        _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_city", city, accepted=False, reason="empty")
-        await ctx.whatsapp.send_text(phone, "Please type your city.")
+        _log_onboarding_event(client, profile["id"], "awaiting_city", city, accepted=False, reason="empty")
+        reply = "Please type your city."
+        await ctx.whatsapp.send_text(phone, reply)
+        _log_turn(client, profile, extracted, [reply])
         return True
-    _log_onboarding_event(ctx.supabase, profile["id"], "awaiting_city", city, accepted=True)
-    ctx.supabase.table("profiles").update({"city": city, "registration_step": "completed"}).eq("id", profile["id"]).execute()
+    _log_onboarding_event(client, profile["id"], "awaiting_city", city, accepted=True)
+    client.table("profiles").update({"city": city, "registration_step": "completed"}).eq("id", profile["id"]).execute()
+    _log_step_transition(client, profile["id"], "awaiting_city", "completed")
 
     pets = (
-        ctx.supabase.table("pets").select("name").eq("profile_id", profile["id"])
+        client.table("pets").select("name").eq("profile_id", profile["id"])
         .order("created_at", desc=True).limit(1).execute().data
     )
     pet_name = pets[0]["name"] if pets else "your pet"
     owner_name = (profile.get("full_name") or "").split(" ")[0] or "there"
 
-    await ctx.whatsapp.send_text(
-        phone,
+    reply = (
         f"\U0001F389 You're all set, {owner_name}!\n\n"
         "Everything on PetPulse is free, always:\n"
         "🩺 Unlimited AI health chats and symptom checks\n"
@@ -176,6 +220,8 @@ async def _handle_city(ctx: AppContext, profile: dict[str, Any], extracted: Extr
         "📍 Nearby vet finder with open-now filters\n"
         "🌐 Chat in English or Hindi\n\n"
         "The only paid part: booking a doctor consultation costs ₹399 per visit.\n\n"
-        f"Ask me anything about {pet_name}'s health, or say \"book a vet\" to schedule a consultation.",
+        f"Ask me anything about {pet_name}'s health, or say \"book a vet\" to schedule a consultation."
     )
+    await ctx.whatsapp.send_text(phone, reply)
+    _log_turn(client, profile, extracted, [reply])
     return True

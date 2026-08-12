@@ -71,3 +71,27 @@ async def test_video_success_path_still_returns_real_analysis(monkeypatch):
 
     assert "limping" in result.media_context
     assert result.document_bytes == b"real-video-bytes"
+
+
+@pytest.mark.asyncio
+async def test_active_pet_name_is_threaded_into_classify_document(monkeypatch):
+    """Confirmed live bug: classify_document used to re-guess pet identity
+    from the media alone, ignoring whichever pet the rest of the
+    conversation already had as "active" -- this is what fixes the
+    "misidentified him in the video" class of bug."""
+    ctx = _make_ctx(download_return=(b"real-video-bytes", "video/mp4"))
+    captured = {}
+
+    async def fake_analyze(openai_client, settings, data, caption, pet_context=""):
+        return "[Video frame analysis] A dog running in a yard."
+
+    async def fake_classify(openai_client, settings, kind, mime, analysis, caption, pets, active_pet_name=None):
+        captured["active_pet_name"] = active_pet_name
+        return None
+
+    monkeypatch.setattr("app.ingestion.media.video_pipeline.analyze_video", fake_analyze)
+    monkeypatch.setattr("app.ingestion.media.classify_document", fake_classify)
+
+    await process_media(ctx, _video_message(), pets=[{"id": "pet-1", "name": "Bobby"}], active_pet={"id": "pet-1", "name": "Bobby"})
+
+    assert captured["active_pet_name"] == "Bobby"

@@ -7,6 +7,7 @@ these as plain templated text, not LLM-composed)."""
 
 import asyncio
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 
 from app.admin.intent_rating import rate_customer_intent
@@ -650,6 +651,101 @@ async def rate_customer_intents(ctx: AppContext) -> None:
                 "intent_rating_message_count": len(msgs),
             }
         ).eq("id", profile_id).execute()
+
+
+PRICE_OBJECTION_SILENCE_THRESHOLD = timedelta(hours=6)
+PRICE_OBJECTION_NUDGE_COOLDOWN = timedelta(days=7)
+PRICE_KEYWORD_PATTERN = re.compile(r"\b(consult\w*|fee|fees|cost\w*|price\w*|paid|payment)\b", re.IGNORECASE)
+
+
+def _mentions_price(text: str | None) -> bool:
+    if not text:
+        return False
+    return "₹" in text or bool(PRICE_KEYWORD_PATTERN.search(text))
+
+
+def _price_objection_nudge_text(profile: dict) -> str:
+    name = profile.get("full_name")
+    greeting = f"Hey {name.split()[0]}!" if name else "Hey there!"
+    return (
+        f"{greeting} Just checking back — did the pricing make sense? Everything on PetPulse is free: "
+        "unlimited AI health chats, symptom checks, emergency triage, document vault, multiple pets, and the "
+        "vet finder. The only paid part is booking an actual doctor consultation, a flat ₹399/visit. Happy to "
+        "answer anything else, or pick up right where we left off \U0001F43E"
+    )
+
+
+async def send_price_objection_nudges(ctx: AppContext) -> None:
+    """Item 3 of the 2026-08 root-cause spec (paywall sequencing): a real
+    transcript showed a customer asking about consultation pricing, getting
+    an answer, and never replying again -- the conversation just died with
+    no automated follow-up. This flags exactly that shape (the bot's own
+    LAST message in the conversation mentions pricing, and the customer
+    hasn't replied since) once PRICE_OBJECTION_SILENCE_THRESHOLD has
+    passed, and sends one clarifying nudge -- then at most one more every
+    PRICE_OBJECTION_NUDGE_COOLDOWN if still silent. Same claim-before-send
+    idempotency shape as every other nudge job in this file."""
+    client = ctx.supabase
+    now = datetime.now(tz=timezone.utc)
+    silence_cutoff = now - PRICE_OBJECTION_SILENCE_THRESHOLD
+    cooldown_cutoff = now - PRICE_OBJECTION_NUDGE_COOLDOWN
+
+    profiles = client.table("profiles").select("*").eq("role", "customer").execute().data or []
+    candidates = [
+        p for p in profiles
+        if not p.get("last_price_objection_nudge_sent_at") or p["last_price_objection_nudge_sent_at"] < cooldown_cutoff.isoformat()
+    ]
+
+    semaphore = asyncio.Semaphore(REENGAGEMENT_LOOKUP_CONCURRENCY)
+
+    async def _check_and_nudge(profile: dict) -> None:
+        async with semaphore:
+            rows = (
+                client.table("messages")
+                .select("sender_type,content,created_at")
+                .eq("profile_id", profile["id"])
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+                .data
+            )
+        if not rows:
+            return
+        last = rows[0]
+        # Only the BOT'S most recent message mentioning pricing, with
+        # nothing from the customer since, counts as this specific silence
+        # -- if the customer's own message is the most recent one, they
+        # clearly aren't silent, regardless of what either of them said.
+        if last.get("sender_type") != "assistant" or not _mentions_price(last.get("content")):
+            return
+        if (last.get("created_at") or "") >= silence_cutoff.isoformat():
+            return  # not silent long enough yet
+
+        claimed = (
+            client.table("profiles")
+            .update({"last_price_objection_nudge_sent_at": now.isoformat()})
+            .eq("id", profile["id"])
+            .or_(f"last_price_objection_nudge_sent_at.is.null,last_price_objection_nudge_sent_at.lt.{cooldown_cutoff.isoformat()}")
+            .execute()
+            .data
+        )
+        if not claimed:
+            return
+
+        phone = profile.get("phone_number")
+        if not phone:
+            return
+        try:
+            await ctx.whatsapp.send_text(phone, _price_objection_nudge_text(profile))
+        except Exception:
+            logger.exception("Failed to send price-objection nudge to %s", phone)
+            # Revert the claim so a transient send failure doesn't silently
+            # block this customer from ever being nudged again.
+            client.table("profiles").update(
+                {"last_price_objection_nudge_sent_at": profile.get("last_price_objection_nudge_sent_at")}
+            ).eq("id", profile["id"]).execute()
+
+    await asyncio.gather(*(_check_and_nudge(p) for p in candidates))
 
 
 async def flag_emergency_checkins(ctx: AppContext) -> None:

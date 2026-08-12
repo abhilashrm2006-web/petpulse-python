@@ -119,6 +119,33 @@ def test_age_rounds_half_up_consistently(spoken, expected):
     assert _normalize_value("age", spoken) == expected
 
 
+def test_dob_accepts_natural_age_phrases_not_just_iso_dates():
+    """Spec item #6: owners frequently don't know an exact birth date, only
+    an approximate age -- "2 years old"/"3.5 yrs" must produce SOME usable
+    DOB instead of silently failing to save."""
+    import datetime as dt
+
+    today = dt.date.today()
+    two_years_ago = today - dt.timedelta(days=round(2 * 365.25))
+    assert _normalize_value("dob", "2 years old") == two_years_ago.isoformat()
+    assert _normalize_value("date_of_birth", "3.5 yrs") is not None
+
+
+def test_dob_accepts_relative_month_phrases():
+    result = _normalize_value("dob", "born last April")
+    assert result is not None
+    assert result.endswith("-04-01")
+
+
+def test_dob_still_accepts_iso_and_mm_yyyy():
+    assert _normalize_value("dob", "2023-05-10") == "2023-05-10"
+    assert _normalize_value("dob", "5/2023") == "2023-05-01"
+
+
+def test_dob_unparseable_text_still_returns_none():
+    assert _normalize_value("dob", "not sure honestly") is None
+
+
 @pytest.mark.asyncio
 async def test_customer_can_register_their_first_pet():
     ctx = _make_ctx()

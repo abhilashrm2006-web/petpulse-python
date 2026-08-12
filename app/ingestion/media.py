@@ -52,6 +52,7 @@ async def process_media(
     ctx: AppContext, extracted: ExtractedMessage, pets: list[dict], active_pet: dict | None = None
 ) -> MediaResult:
     pet_context = build_pet_background_note(active_pet)
+    active_pet_name = active_pet.get("name") if active_pet else None
 
     if extracted.image_media_id:
         try:
@@ -60,7 +61,7 @@ async def process_media(
                 ctx.openai, ctx.settings, base64.b64encode(data).decode(), mime, extracted.text, pet_context
             )
             classification = await classify_document(
-                ctx.openai, ctx.settings, "image", mime, analysis, extracted.text, pets
+                ctx.openai, ctx.settings, "image", mime, analysis, extracted.text, pets, active_pet_name
             )
             return MediaResult(
                 media_context=f"[Image analysis] {analysis}",
@@ -87,7 +88,7 @@ async def process_media(
             mime = extracted.document_mime_type or mime
             analysis = await document_pipeline.analyze_document(ctx.openai, ctx.settings, data, mime, extracted.text)
             classification = await classify_document(
-                ctx.openai, ctx.settings, "document", mime, analysis, extracted.text, pets
+                ctx.openai, ctx.settings, "document", mime, analysis, extracted.text, pets, active_pet_name
             )
             return MediaResult(
                 media_context=f"[Document analysis] {analysis}",
@@ -104,7 +105,7 @@ async def process_media(
             data, mime = await ctx.whatsapp.download_media_bytes(extracted.video_media_id)
             analysis = await video_pipeline.analyze_video(ctx.openai, ctx.settings, data, extracted.text, pet_context)
             classification = await classify_document(
-                ctx.openai, ctx.settings, "video", mime, analysis, extracted.text, pets
+                ctx.openai, ctx.settings, "video", mime, analysis, extracted.text, pets, active_pet_name
             )
             return MediaResult(
                 media_context=analysis,

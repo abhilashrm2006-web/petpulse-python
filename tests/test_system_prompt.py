@@ -205,3 +205,26 @@ def test_no_location_line_when_no_pin_shared():
     context = build_turn_context(agent_ctx, extracted, media_context="", document_filing_status="")
 
     assert "Shared location pin" not in context
+
+
+def test_bare_yes_no_resolution_rule_covers_generic_offers_not_just_structured_flows():
+    assert "Bare yes/no against your own last offer" in CUSTOMER_RULES
+    assert "what are you saying yes to" in CUSTOMER_RULES.lower()
+    assert "recording consent, prescription format" in CUSTOMER_RULES.lower() or "recording consent" in CUSTOMER_RULES
+
+
+def test_pricing_sequencing_rule_forbids_pricing_in_same_turn_as_unresolved_failure():
+    assert "Pricing sequencing" in CUSTOMER_RULES
+    assert "unresolved tool failure" in CUSTOMER_RULES
+    assert "₹399" in CUSTOMER_RULES
+
+
+def test_remote_only_procedure_disclosure_rule_exists():
+    assert "Remote-only expectation for procedures/surgery" in CUSTOMER_RULES
+    assert "spay, neuter, surgery, operation" in CUSTOMER_RULES
+    assert "remote/online-only" in CUSTOMER_RULES
+
+
+def test_invalid_value_narrower_reask_rule_exists():
+    assert 'error="invalid_value"' in CUSTOMER_RULES
+    assert "narrower" in CUSTOMER_RULES.lower()

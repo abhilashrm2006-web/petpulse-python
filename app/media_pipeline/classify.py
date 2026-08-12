@@ -57,6 +57,9 @@ Rules:
 - KCI/breed-registration papers are "Other", never "Vaccination Certificate".
 - Casual pet photos are "Photo" with is_medical_document=false.
 - If a document contains any handwritten field, handwritten=true.
+- If the prompt states a "currently active pet", return that pet's name UNLESS the caption or the media \
+itself clearly names or shows a different pet on the account -- don't re-guess identity from visual \
+similarity alone when a specific pet is already the conversation's context.
 """
 
 
@@ -79,11 +82,26 @@ async def classify_document(
     analysis_text: str,
     caption: str,
     pets: list[dict[str, Any]],
+    active_pet_name: str | None = None,
 ) -> DocumentClassification:
     pet_names = [p.get("name") for p in pets if p.get("name")]
+    # Confirmed live bug: without this hint the pet_name guess is re-derived
+    # from scratch every time, purely from the media + a flat list of every
+    # pet name on the account -- ignoring whichever pet the rest of the
+    # conversation is already tracking as "active" (see
+    # app.ingestion.context.AgentContext.active_pet). Biasing toward it
+    # (not forcing it) fixes the "misidentified him in the video" class of
+    # bug without breaking the real "customer sends a photo of a DIFFERENT,
+    # named pet" case.
+    active_pet_hint = (
+        f"\nthe conversation's currently active pet right now is {active_pet_name!r} -- prefer this pet "
+        "unless the caption or vision analysis clearly names a different pet on the account"
+        if active_pet_name
+        else ""
+    )
     user_prompt = (
         f"kind={kind}\nmime={mime_type}\ncaption={caption or '(none)'}\n"
-        f"known pet names on this account: {pet_names}\n\nvision analysis:\n{analysis_text}"
+        f"known pet names on this account: {pet_names}{active_pet_hint}\n\nvision analysis:\n{analysis_text}"
     )
     raw = await json_completion(client, settings, CLASSIFY_SYSTEM_PROMPT, user_prompt, reasoning_effort="low")
     try:
@@ -98,7 +116,7 @@ async def classify_document(
     is_medical_document = bool(verdict.get("is_medical_document", False))
     handwritten = bool(verdict.get("handwritten", False))
 
-    resolution = resolve_pet(pets, pet_name=verdict.get("pet_name"), auto_resolve_single=True)
+    resolution = resolve_pet(pets, pet_name=verdict.get("pet_name") or active_pet_name, auto_resolve_single=True)
     target_pet = resolution.pet
 
     return DocumentClassification(

@@ -280,3 +280,86 @@ async def test_city_step_saves_city_and_completes_registration():
     assert "Bobby" in message
     assert "free" in message.lower()
     assert "₹399" in message
+
+
+# --- funnel visibility: conversations/messages + step history --------------
+
+@pytest.mark.asyncio
+async def test_wizard_handled_turn_still_logs_a_conversation_and_messages():
+    """The exact bug this fixes: 59/106 stuck profiles had zero
+    conversations/messages rows because handle_registration returns before
+    run_agent_turn (which used to own all message-logging) ever runs."""
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    await handle_registration(ctx, _msg(text="Anudeep Reddy"))
+
+    conversations = supabase.rows("conversations")
+    messages = supabase.rows("messages")
+    assert len(conversations) == 1
+    assert conversations[0]["profile_id"] == "profile-1"
+    assert any(m["sender_type"] == "user" and m["content"] == "Anudeep Reddy" for m in messages)
+    assert any(m["sender_type"] == "assistant" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_reprompt_also_logs_a_conversation_turn():
+    """Not just accepted steps -- a rejected/re-prompted reply is exactly
+    the ambiguous "did they reply at all" case the spec calls out."""
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    await handle_registration(ctx, _msg(text="Sorry im a veterinarian"))
+
+    messages = supabase.rows("messages")
+    assert any(m["content"] == "Sorry im a veterinarian" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_step_transitions_are_recorded_in_history():
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    await handle_registration(ctx, _msg(text="Anudeep Reddy"))
+
+    history = supabase.rows("registration_step_history")
+    assert len(history) == 1
+    assert history[0]["from_step"] == "awaiting_customer_name"
+    assert history[0]["to_step"] == "awaiting_pet_name"
+
+
+@pytest.mark.asyncio
+async def test_brand_new_number_logs_a_step_history_row_from_none():
+    supabase = FakeSupabaseClient()
+    ctx = _make_ctx(supabase)
+
+    await handle_registration(ctx, _msg(text="hi"))
+
+    history = supabase.rows("registration_step_history")
+    assert len(history) == 1
+    assert history[0]["from_step"] is None
+    assert history[0]["to_step"] == "awaiting_customer_name"
+
+
+@pytest.mark.asyncio
+async def test_missing_instrumentation_tables_never_break_the_wizard():
+    """Same best-effort guarantee as onboarding_events -- registration_step_history
+    and conversations/messages logging must never block the actual wizard step."""
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    real_table = supabase.table
+
+    def _table(name):
+        if name in ("registration_step_history", "conversations", "messages"):
+            raise Exception(f'relation "{name}" does not exist')
+        return real_table(name)
+
+    supabase.table = _table
+
+    handled = await handle_registration(ctx, _msg(text="Anudeep Reddy"))
+
+    assert handled is True
+    profile = supabase.rows("profiles")[0]
+    assert profile["full_name"] == "Anudeep Reddy"
+    assert profile["registration_step"] == "awaiting_pet_name"

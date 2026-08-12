@@ -1578,3 +1578,66 @@ async def test_analytics_pnl_computes_revenue_and_costs():
     assert result["total_costs_inr_approx"] == 1330.0
     assert result["net_in_range_inr_approx"] == 399 - 1330.0
     assert result["fx_rate_used"] == 83.0
+
+
+@pytest.mark.asyncio
+async def test_onboarding_funnel_counts_current_steps_and_completed():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "c1", "role": "customer", "registration_step": "awaiting_pet_name"},
+                {"id": "c2", "role": "customer", "registration_step": "awaiting_pet_name"},
+                {"id": "c3", "role": "customer", "registration_step": "completed"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.onboarding_funnel(request)
+
+    by_step = {row["step"]: row["profiles_currently_here"] for row in result["funnel"]}
+    assert by_step["awaiting_pet_name"] == 2
+    assert result["completed_count"] == 1
+    assert result["total_customers"] == 3
+
+
+@pytest.mark.asyncio
+async def test_onboarding_funnel_reports_accept_reject_rates_from_events():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [{"id": "c1", "role": "customer", "registration_step": "awaiting_customer_name"}],
+            "onboarding_events": [
+                {"profile_id": "c1", "registration_step": "awaiting_customer_name", "validator_result": "rejected", "rejection_reason": "not_name_like"},
+                {"profile_id": "c1", "registration_step": "awaiting_customer_name", "validator_result": "accepted", "rejection_reason": None},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.onboarding_funnel(request)
+
+    row = next(r for r in result["funnel"] if r["step"] == "awaiting_customer_name")
+    assert row["accepted_replies"] == 1
+    assert row["rejected_replies"] == 1
+
+
+@pytest.mark.asyncio
+async def test_onboarding_funnel_computes_avg_time_in_step_from_history():
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [{"id": "c1", "role": "customer", "registration_step": "completed"}],
+            "registration_step_history": [
+                {"profile_id": "c1", "from_step": None, "to_step": "awaiting_customer_name", "created_at": "2026-08-01T10:00:00+00:00"},
+                {"profile_id": "c1", "from_step": "awaiting_customer_name", "to_step": "awaiting_pet_name", "created_at": "2026-08-01T10:01:00+00:00"},
+                {"profile_id": "c1", "from_step": "awaiting_pet_name", "to_step": "awaiting_city", "created_at": "2026-08-01T10:03:00+00:00"},
+            ],
+        }
+    )
+    request = _fake_request(_make_ctx(supabase))
+
+    result = await admin_routes.onboarding_funnel(request)
+
+    row = next(r for r in result["funnel"] if r["step"] == "awaiting_customer_name")
+    assert row["avg_seconds_in_step"] == 60.0
+    row2 = next(r for r in result["funnel"] if r["step"] == "awaiting_pet_name")
+    assert row2["avg_seconds_in_step"] == 120.0

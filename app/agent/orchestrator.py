@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.agent import memory
+from app.agent.conversation_log import log_conversation_turn
 from app.agent.language import SUPPORTED_LANGUAGES, detect_regional_language
 from app.agent.registry import get_tool_fn, get_tool_schemas, is_tool_allowed_for_role
 from app.agent.tools.greeting import is_bare_greeting, send_welcome_character
@@ -213,59 +214,21 @@ async def run_agent_turn(
     except Exception:
         logger.exception("Failed to update long-term memory for profile=%s", agent_ctx.profile["id"])
 
-    try:
-        # A fresh `conversations` row per inbound message, matching n8n exactly (spec §2) —
-        # continuity lives only in the chat-memory table above, not at the DB level here.
-        conversation = client.table("conversations").insert(
-            {
-                "profile_id": agent_ctx.profile["id"],
-                "pet_id": agent_ctx.active_pet["id"] if agent_ctx.active_pet else None,
-                "channel": "whatsapp",
-                "status": "active",
-            }
-        ).execute().data[0]
-
-        # Each row's metadata.wamid is how a later "reply"/quote from the customer
-        # (WhatsApp's context.id on their next message) gets resolved back to actual
-        # text -- see app.ingestion.context._resolve_quoted_message. One row per
-        # WhatsApp bubble, not one combined row for the whole turn, since a customer
-        # can tap-reply to any single bubble of a multi-chunk answer specifically.
-        inbound_row = {
-            "conversation_id": conversation["id"],
-            "profile_id": agent_ctx.profile["id"],
-            "sender_type": "vet" if role == "vet" else "user",
-            "content": extracted.text,
-            "message_type": extracted.message_type if extracted.message_type in
-                ("text", "image", "audio", "video", "document", "location") else "text",
-            "metadata": {"wamid": extracted.message_id} if extracted.message_id else {},
-        }
-        outbound_rows = (
-            [
-                {
-                    "conversation_id": conversation["id"],
-                    "profile_id": agent_ctx.profile["id"],
-                    "sender_type": "assistant",
-                    "content": chunk_text,
-                    "message_type": "text",
-                    "metadata": {"wamid": wamid},
-                }
-                for wamid, chunk_text in sent_chunks
-            ]
-            if sent_chunks
-            else [
-                {
-                    "conversation_id": conversation["id"],
-                    "profile_id": agent_ctx.profile["id"],
-                    "sender_type": "assistant",
-                    "content": final_text,
-                    "message_type": "text",
-                    "metadata": {},
-                }
-            ]
-        )
-        client.table("messages").insert([inbound_row, *outbound_rows]).execute()
-    except Exception:
-        logger.exception("Failed to log conversation/messages for profile=%s", agent_ctx.profile["id"])
+    # Each row's metadata.wamid is how a later "reply"/quote from the customer
+    # (WhatsApp's context.id on their next message) gets resolved back to actual
+    # text -- see app.ingestion.context._resolve_quoted_message. One row per
+    # WhatsApp bubble, not one combined row for the whole turn, since a customer
+    # can tap-reply to any single bubble of a multi-chunk answer specifically.
+    log_conversation_turn(
+        client,
+        profile_id=agent_ctx.profile["id"],
+        pet_id=agent_ctx.active_pet["id"] if agent_ctx.active_pet else None,
+        sender_type="vet" if role == "vet" else "user",
+        inbound_text=extracted.text,
+        inbound_message_type=extracted.message_type,
+        inbound_wamid=extracted.message_id,
+        outbound_texts_with_wamid=sent_chunks if sent_chunks else [(None, final_text)],
+    )
 
     if role != "vet":
         try:

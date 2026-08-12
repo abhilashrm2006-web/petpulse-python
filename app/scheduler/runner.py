@@ -13,6 +13,7 @@ from app.scheduler.jobs import (
     send_doctor_schedule_reminders,
     send_new_parent_followups,
     send_onboarding_reminders,
+    send_price_objection_nudges,
     send_reengagement_nudges,
     send_vaccination_reminders,
     sync_doctor_onboarding_drafts,
@@ -54,6 +55,10 @@ def start_scheduler(ctx: AppContext) -> AsyncIOScheduler:
     # same reasoning as reengagement_nudges above; a possible real emergency
     # shouldn't sit unflagged for up to a day's slack past the threshold.
     scheduler.add_job(flag_emergency_checkins, CronTrigger(hour="*/6", minute=5), args=[ctx], id="emergency_checkin_flags")
+    # Every 6 hours, staggered from the other */6h jobs above --
+    # PRICE_OBJECTION_SILENCE_THRESHOLD (6h) is itself hour-granular, same
+    # reasoning as reengagement_nudges.
+    scheduler.add_job(send_price_objection_nudges, CronTrigger(hour="*/6", minute=20), args=[ctx], id="price_objection_nudges")
 
     scheduler.start()
     return scheduler

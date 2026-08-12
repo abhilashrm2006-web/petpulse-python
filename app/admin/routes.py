@@ -1299,6 +1299,80 @@ async def analytics_reports(request: Request, date_from: str = "", date_to: str 
     }
 
 
+@router.get("/onboarding-funnel")
+async def onboarding_funnel(request: Request) -> dict[str, Any]:
+    """Dedicated onboarding-step funnel dashboard (2026-08 root-cause item
+    #2) -- distinct from analytics_reports' customer_funnel (current stage
+    of every customer across the WHOLE lifecycle, including post-signup
+    booking stages). This one is specifically about the 3-question wizard:
+    how many profiles are sitting at each step right now, how often each
+    step's validator accepts vs. rejects a reply (from onboarding_events),
+    and how long profiles that DID move on typically took to advance past
+    each step (from registration_step_history) -- so a stuck cohort and a
+    slow-but-not-stuck cohort don't look the same."""
+    ctx = _ctx(request)
+    client = ctx.supabase
+
+    profiles = client.table("profiles").select("registration_step").eq("role", "customer").execute().data or []
+    step_counts: dict[str, int] = {}
+    for p in profiles:
+        step = p.get("registration_step") or "completed"
+        step_counts[step] = step_counts.get(step, 0) + 1
+
+    events = client.table("onboarding_events").select("registration_step,validator_result").execute().data or []
+    validator_stats: dict[str, dict[str, int]] = {}
+    for e in events:
+        step = e["registration_step"]
+        bucket = validator_stats.setdefault(step, {"accepted": 0, "rejected": 0})
+        bucket[e["validator_result"]] = bucket.get(e["validator_result"], 0) + 1
+
+    history = (
+        client.table("registration_step_history").select("profile_id,from_step,to_step,created_at")
+        .order("created_at").execute().data or []
+    )
+    by_profile: dict[str, list[dict[str, Any]]] = {}
+    for row in history:
+        by_profile.setdefault(row["profile_id"], []).append(row)
+
+    # Time-in-step: for each profile's ordered transitions, the gap between
+    # entering `from_step` and leaving it (the next row's created_at minus
+    # this row's created_at) attributes that duration to `from_step`.
+    durations_by_step: dict[str, list[float]] = {}
+    for rows in by_profile.values():
+        for i in range(len(rows) - 1):
+            step = rows[i]["to_step"]  # the step they were IN during this gap
+            if not step:
+                continue
+            try:
+                started = datetime.fromisoformat(rows[i]["created_at"].replace("Z", "+00:00"))
+                ended = datetime.fromisoformat(rows[i + 1]["created_at"].replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+            durations_by_step.setdefault(step, []).append((ended - started).total_seconds())
+
+    all_steps = sorted(set(step_counts) | set(validator_stats) | set(durations_by_step) - {"completed"})
+    funnel = []
+    for step in all_steps:
+        durations = durations_by_step.get(step, [])
+        stats = validator_stats.get(step, {"accepted": 0, "rejected": 0})
+        funnel.append(
+            {
+                "step": step,
+                "profiles_currently_here": step_counts.get(step, 0),
+                "accepted_replies": stats.get("accepted", 0),
+                "rejected_replies": stats.get("rejected", 0),
+                "avg_seconds_in_step": round(sum(durations) / len(durations), 1) if durations else None,
+                "profiles_advanced_past": len(durations),
+            }
+        )
+
+    return {
+        "funnel": funnel,
+        "completed_count": step_counts.get("completed", 0),
+        "total_customers": len(profiles),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Platform costs -- manual-entry spend/credits tracking per external
 # platform this project runs on (OpenAI, Railway, Supabase, Vercel, ...).
