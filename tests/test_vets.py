@@ -55,6 +55,22 @@ async def test_emergency_24h_filter_narrows_results():
 
 
 @pytest.mark.asyncio
+async def test_overpass_call_always_sends_a_user_agent():
+    """Live audit bug (2026-08-12): Overpass returns a bare 406 for any
+    request with no User-Agent -- this was silently true in production for
+    every real call until this was caught. Regression guard against
+    dropping the header again."""
+    post = AsyncMock(return_value=_ok_overpass_response())
+    ctx = _make_ctx(post=post)
+    agent_ctx = _make_agent_ctx()
+
+    await find_nearby_vets(ctx, agent_ctx, location_text="Bengaluru")
+
+    _, kwargs = post.call_args
+    assert kwargs.get("headers", {}).get("User-Agent")
+
+
+@pytest.mark.asyncio
 async def test_no_filters_gets_everything():
     ctx = _make_ctx()
     agent_ctx = _make_agent_ctx()

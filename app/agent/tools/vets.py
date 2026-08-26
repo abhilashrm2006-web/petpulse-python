@@ -206,7 +206,15 @@ async def find_nearby_vets(
     query = f'[out:json][timeout:25];(node["amenity"="veterinary"](around:{RADIUS_METERS},{lat},{lon});way["amenity"="veterinary"](around:{RADIUS_METERS},{lat},{lon});relation["amenity"="veterinary"](around:{RADIUS_METERS},{lat},{lon}););out center tags;'
 
     async def _call():
-        resp = await ctx.http.post(OVERPASS_URL, data={"data": query})
+        # Confirmed live 2026-08-12 audit: Overpass rejects any request with
+        # no User-Agent with a bare 406, no body -- unlike the Nominatim call
+        # above, this POST never set one, so every real production call was
+        # silently falling through to retries-then-fallback/escalation and
+        # NEVER actually returning live results. Overpass's own usage policy
+        # asks for a contactable identifier, not just any string.
+        resp = await ctx.http.post(
+            OVERPASS_URL, data={"data": query}, headers={"User-Agent": "PetPulse/1.0 (support@petpulse.app)"}
+        )
         resp.raise_for_status()
         return resp.json().get("elements", [])
 
