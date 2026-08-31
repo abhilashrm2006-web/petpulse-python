@@ -1264,6 +1264,32 @@ async def test_deactivated_vets_are_never_offered_in_the_catalogue():
 
 
 @pytest.mark.asyncio
+async def test_doctor_missing_experience_or_specialization_never_renders_literal_none():
+    """Live bug (2026-08-27): a doctor onboarded with experience_years/
+    specialization left unset renders as the literal string "Noney exp •
+    None" -- dict.get(key, default) only applies its default when the key
+    is absent, not when it's present with value None."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "profiles": [
+                {"id": "v1", "role": "vet", "phone_number": "919000000001", "full_name": "Dr. NoData", "is_active": True, "experience_years": None, "specialization": None},
+                {"id": "v2", "role": "vet", "phone_number": "919000000002", "full_name": "Dr. Complete", "is_active": True, "experience_years": 8, "specialization": "Surgery"},
+            ],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    await request_doctor_session(ctx, agent_ctx, case_summary="routine checkup")
+
+    sent_rows = ctx.whatsapp.send_interactive_list.call_args.kwargs["sections"][0]["rows"]
+    descriptions = {row["title"]: row["description"] for row in sent_rows if "cancel_booking" not in row["id"]}
+    assert "None" not in descriptions["Dr. NoData"]
+    assert descriptions["Dr. NoData"] == "? years exp • General Practice"
+    assert descriptions["Dr. Complete"] == "8 years exp • Surgery"
+
+
+@pytest.mark.asyncio
 async def test_mark_session_done_sets_completed_at():
     supabase = FakeSupabaseClient(
         initial={

@@ -228,3 +228,15 @@ def test_remote_only_procedure_disclosure_rule_exists():
 def test_invalid_value_narrower_reask_rule_exists():
     assert 'error="invalid_value"' in CUSTOMER_RULES
     assert "narrower" in CUSTOMER_RULES.lower()
+
+
+def test_human_support_escalation_rule_gives_a_free_path_separate_from_paid_consult():
+    assert "Human-support escalation" in CUSTOMER_RULES
+    assert "9742228305" in CUSTOMER_RULES
+    assert "Never" in CUSTOMER_RULES and "paid ₹399 vet consultation" in CUSTOMER_RULES
+
+
+def test_staying_on_topic_rule_redirects_unrelated_trivia():
+    assert "Staying on-topic" in CUSTOMER_RULES
+    assert "capital of France" in CUSTOMER_RULES
+    assert "should NOT be answered directly" in CUSTOMER_RULES

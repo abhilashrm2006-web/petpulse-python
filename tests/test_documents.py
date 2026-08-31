@@ -246,3 +246,23 @@ async def test_get_pet_passport_includes_full_batch_details(monkeypatch):
     assert "Zoetis" in result["passport_text"]
     assert "Batch/Lot: LOT-1" in result["passport_text"]
     assert result["overdue_vaccinations"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pet_passport_shows_fallback_text_for_empty_sections_not_bare_headers():
+    """Live bug (2026-08-27): a pet with no vaccinations/medical records on
+    file rendered just the "*Vaccinations:*"/"*Recent medical records:*"
+    headers with nothing underneath -- no data and no explanation, which
+    reads as broken rather than "nothing on file yet"."""
+    from tests.fake_supabase import FakeSupabaseClient
+    from app.agent.tools.documents import get_pet_passport
+
+    supabase = FakeSupabaseClient(initial={"vaccinations": [], "medical_records": []})
+    agent_ctx = SimpleNamespace(pets=[{"id": "pet-1", "name": "Rex", "species": "Dog"}], profile={"phone_number": "919876543210"})
+    ctx = SimpleNamespace(supabase=supabase, whatsapp=SimpleNamespace(send_document=AsyncMock(), send_image=AsyncMock()))
+
+    result = await get_pet_passport(ctx, agent_ctx, pet_id="pet-1", send_certificates=False)
+
+    text = result["passport_text"]
+    assert "*Vaccinations:*\nNo vaccination records on file yet" in text
+    assert "*Recent medical records:*\nNo medical records on file yet" in text

@@ -31,6 +31,14 @@ from app.ingestion.context import AgentContext
 logger = logging.getLogger(__name__)
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Confirmed live 2026-08-27: a real customer hit the total-failure escalation
+# message during normal use, and the primary overpass-api.de instance is a
+# free, best-effort public service with known intermittent overload/outages
+# -- a customer report of this NOT being a rare edge case. Retrying the same
+# overloaded instance 3 times back-to-back doesn't help; the last retry
+# attempt now goes to a genuinely different provider instead, since
+# different public Overpass mirrors go down independently of each other.
+OVERPASS_MIRROR_URL = "https://overpass.kumi.systems/api/interpreter"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 RADIUS_METERS = 8000
 
@@ -53,14 +61,17 @@ SUPPORT_CONTACT_NOTE = (
 
 
 async def _with_retries(call, *, what: str):
-    """Runs `call()` (a zero-arg async callable) up to RETRY_ATTEMPTS times,
-    sleeping a short backoff between attempts. Re-raises the last exception
-    if every attempt fails -- callers decide what to do next (fallback,
-    escalation), this helper only owns the retry loop itself."""
+    """Runs `call(attempt)` (an async callable taking the zero-based attempt
+    index) up to RETRY_ATTEMPTS times, sleeping a short backoff between
+    attempts. Re-raises the last exception if every attempt fails --
+    callers decide what to do next (fallback, escalation), this helper only
+    owns the retry loop itself. The attempt index lets a caller vary WHAT
+    it calls per attempt (e.g. switch provider on the last try), not just
+    retry the identical call."""
     last_exc: Exception | None = None
     for attempt in range(RETRY_ATTEMPTS):
         try:
-            return await call()
+            return await call(attempt)
         except Exception as exc:
             last_exc = exc
             logger.warning("find_nearby_vets: %s attempt %d/%d failed: %s", what, attempt + 1, RETRY_ATTEMPTS, exc)
@@ -78,7 +89,7 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 async def _geocode(ctx: AppContext, query: str) -> tuple[float, float] | None:
-    async def _call():
+    async def _call(attempt: int):
         resp = await ctx.http.get(
             NOMINATIM_URL,
             params={"q": query, "format": "json", "limit": 1},
@@ -205,15 +216,23 @@ async def find_nearby_vets(
 
     query = f'[out:json][timeout:25];(node["amenity"="veterinary"](around:{RADIUS_METERS},{lat},{lon});way["amenity"="veterinary"](around:{RADIUS_METERS},{lat},{lon});relation["amenity"="veterinary"](around:{RADIUS_METERS},{lat},{lon}););out center tags;'
 
-    async def _call():
+    async def _call(attempt: int):
         # Confirmed live 2026-08-12 audit: Overpass rejects any request with
         # no User-Agent with a bare 406, no body -- unlike the Nominatim call
         # above, this POST never set one, so every real production call was
         # silently falling through to retries-then-fallback/escalation and
         # NEVER actually returning live results. Overpass's own usage policy
         # asks for a contactable identifier, not just any string.
+        #
+        # Confirmed live 2026-08-27: a real customer hit the escalation
+        # message during normal use even with the header fix -- the primary
+        # instance is a free, best-effort public service that does go down/
+        # overload on its own. The last attempt switches to a different
+        # public mirror rather than retrying the same (possibly still-down)
+        # instance a third time.
+        url = OVERPASS_URL if attempt < RETRY_ATTEMPTS - 1 else OVERPASS_MIRROR_URL
         resp = await ctx.http.post(
-            OVERPASS_URL, data={"data": query}, headers={"User-Agent": "PetPulse/1.0 (support@petpulse.app)"}
+            url, data={"data": query}, headers={"User-Agent": "PetPulse/1.0 (support@petpulse.app)"}
         )
         resp.raise_for_status()
         return resp.json().get("elements", [])

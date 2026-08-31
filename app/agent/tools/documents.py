@@ -145,6 +145,11 @@ def build_full_passport_text(client, pet: dict[str, Any]) -> tuple[str, int]:
 
     overdue_count = 0
     lines.append("\n*Vaccinations:*")
+    if not vaccinations:
+        # Live bug (2026-08-27): an empty list left just the bare header with
+        # no content and no indication whether that means "nothing on file"
+        # or a fetch that silently returned nothing -- always say which.
+        lines.append(f"No vaccination records on file yet — add one during {pet['name']}'s next vet visit.")
     for vax in vaccinations:
         line, overdue = _format_vaccination_line(vax, today)
         if overdue:
@@ -152,6 +157,8 @@ def build_full_passport_text(client, pet: dict[str, Any]) -> tuple[str, int]:
         lines.append(line)
 
     lines.append("\n*Recent medical records:*")
+    if not medical_records:
+        lines.append(f"No medical records on file yet for {pet['name']}.")
     for rec in medical_records:
         summary = (rec.get("chief_complaint") or rec.get("diagnosis") or "visit")[:140]
         lines.append(f"- {rec['visit_date']}: {summary}")

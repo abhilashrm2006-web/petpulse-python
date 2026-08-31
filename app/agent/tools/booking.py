@@ -216,7 +216,12 @@ async def _send_doctor_catalogue(ctx: AppContext, session_id: str, phone: str) -
         {
             "id": f"choose_doctor|{session_id}|{doc['phone_number']}",
             "title": (doc.get("full_name") or "Vet")[:24],
-            "description": f"{doc.get('experience_years', '?')}y exp • {doc.get('specialization', 'General')}"[:72],
+            # Confirmed live bug (2026-08-27): dict.get(key, default) only
+            # applies the default when the KEY is absent, not when it's
+            # present with a None value -- a doctor onboarded without
+            # experience_years/specialization set rendered as the literal
+            # string "Noney exp • None". `or` catches both cases.
+            "description": f"{doc.get('experience_years') or '?'} years exp • {doc.get('specialization') or 'General Practice'}"[:72],
         }
         for doc in doctors
     ]

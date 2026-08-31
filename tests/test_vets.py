@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.agent.tools.vets import find_nearby_vets
+from app.agent.tools.vets import OVERPASS_MIRROR_URL, OVERPASS_URL, find_nearby_vets
 from tests.fake_supabase import FakeSupabaseClient
 
 OSM_ELEMENTS = [
@@ -91,6 +91,22 @@ async def test_overpass_transient_failure_then_success_retries_and_recovers():
     assert post.await_count == 2
     assert result["count"] == 2
     assert result["clinics"][0]["name"] in {"24/7 Emergency Pet Hospital", "Daytime Vet Clinic"}
+
+
+@pytest.mark.asyncio
+async def test_last_retry_attempt_switches_to_a_different_overpass_mirror():
+    """Live-confirmed 2026-08-27: retrying the same overloaded/down public
+    Overpass instance 3 times back-to-back doesn't help -- the last attempt
+    must hit a genuinely different provider."""
+    post = AsyncMock(side_effect=[Exception("down"), Exception("still down"), _ok_overpass_response()])
+    ctx = _make_ctx(post=post)
+    agent_ctx = _make_agent_ctx()
+
+    result = await find_nearby_vets(ctx, agent_ctx, location_text="Bengaluru")
+
+    assert result["count"] == 2
+    urls_called = [call.args[0] for call in post.call_args_list]
+    assert urls_called == [OVERPASS_URL, OVERPASS_URL, OVERPASS_MIRROR_URL]
 
 
 @pytest.mark.asyncio
