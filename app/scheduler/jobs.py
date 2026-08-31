@@ -14,6 +14,7 @@ from app.admin.intent_rating import rate_customer_intent
 from app.availability.slots import IST
 from app.deps import AppContext
 from app.integrations import google_drive
+from app.integrations.proactive_messaging import send_proactive_message
 from app.integrations.supabase_client import get_pet_member_contacts, is_unique_violation
 from app.media_pipeline.doctor_documents import extract_doctor_fields
 
@@ -118,7 +119,7 @@ async def _send_countdown_reminders(ctx: AppContext, client, today: date) -> Non
                 continue
             text = full_text
             try:
-                await ctx.whatsapp.send_text(phone, text)
+                await send_proactive_message(ctx, profile_id, phone, text)
                 any_sent = True
             except Exception:
                 logger.exception("Failed to send vaccination countdown reminder to %s", phone)
@@ -173,7 +174,7 @@ async def _send_overdue_reminders(ctx: AppContext, client, today_iso: str) -> No
                 continue
             text = full_text
             try:
-                await ctx.whatsapp.send_text(phone, text)
+                await send_proactive_message(ctx, profile_id, phone, text)
                 any_sent = True
             except Exception:
                 logger.exception("Failed to send overdue vaccination reminder to %s", phone)
@@ -243,7 +244,7 @@ async def send_new_parent_followups(ctx: AppContext) -> None:
         phone = profile_rows[0]["phone_number"] if profile_rows else None
         if phone:
             try:
-                await ctx.whatsapp.send_text(phone, followup["message_text"])
+                await send_proactive_message(ctx, followup["profile_id"], phone, followup["message_text"])
                 client.table("new_parent_followups").update({"status": "sent"}).eq("id", followup["id"]).execute()
             except Exception:
                 logger.exception("Failed to send new-parent followup to %s", phone)
@@ -337,7 +338,7 @@ async def send_reengagement_nudges(ctx: AppContext) -> None:
         if not phone:
             return
         try:
-            await ctx.whatsapp.send_text(phone, _reengagement_text(profile))
+            await send_proactive_message(ctx, profile["id"], phone, _reengagement_text(profile))
         except Exception:
             logger.exception("Failed to send re-engagement nudge to %s", phone)
             # Revert the claim so a transient send failure doesn't silently
@@ -406,7 +407,7 @@ async def send_onboarding_reminders(ctx: AppContext) -> None:
             if not phone:
                 return
             try:
-                await ctx.whatsapp.send_text(phone, _onboarding_reminder_text(profile))
+                await send_proactive_message(ctx, profile["id"], phone, _onboarding_reminder_text(profile))
             except Exception:
                 logger.exception("Failed to send onboarding reminder to %s", phone)
                 # Revert the claim so a transient send failure doesn't silently
@@ -736,7 +737,7 @@ async def send_price_objection_nudges(ctx: AppContext) -> None:
         if not phone:
             return
         try:
-            await ctx.whatsapp.send_text(phone, _price_objection_nudge_text(profile))
+            await send_proactive_message(ctx, profile["id"], phone, _price_objection_nudge_text(profile))
         except Exception:
             logger.exception("Failed to send price-objection nudge to %s", phone)
             # Revert the claim so a transient send failure doesn't silently

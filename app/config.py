@@ -21,6 +21,20 @@ class Settings(BaseSettings):
     # free-form text.
     whatsapp_reengagement_template_name: str = ""
     whatsapp_reengagement_template_language: str = "en"
+    # Generic single-variable wrapper template (2026-08-27) for every
+    # RECURRING proactive/scheduled customer nudge (48h gone-quiet
+    # reengagement, 24h stuck-onboarding reminder, price-objection-silence
+    # nudge, vaccination reminders, new-parent followups) -- these all
+    # compose fully dynamic message text with no fixed shape a 2-3
+    # variable template could hold, unlike the one-off broadcast scripts
+    # above. See app.integrations.proactive_messaging.send_proactive_message,
+    # which picks free-form send_text vs this template automatically based
+    # on whether the customer is still inside WhatsApp's 24h customer-service
+    # session window -- confirmed live (2026-08-27): every one of these jobs
+    # was silently failing delivery (error 131047) for any customer outside
+    # that window, since free-form text isn't reliably deliverable there.
+    whatsapp_generic_nudge_template_name: str = ""
+    whatsapp_generic_nudge_template_language: str = "en"
 
     # OpenAI
     openai_api_key: str = ""

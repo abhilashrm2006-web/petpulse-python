@@ -65,11 +65,13 @@ async def main(dry_run: bool) -> None:
             print(f"[DRY RUN] would send to {profile['phone_number']}:\n{message}\n")
         return
 
-    if not settings.whatsapp_reengagement_template_name:
+    if not settings.whatsapp_generic_nudge_template_name:
         print(
             "No approved WhatsApp template configured -- refusing to send live "
-            "(same policy as scripts/reengage_stranded_onboarding.py). "
-            "Set WHATSAPP_REENGAGEMENT_TEMPLATE_NAME once one is approved, or re-run with --dry-run.",
+            "(same policy as scripts/reengage_stranded_onboarding.py). This script uses the "
+            "GENERIC single-variable template (not whatsapp_reengagement_template_name, which is "
+            "the 2-variable resume-onboarding template) -- "
+            "set WHATSAPP_GENERIC_NUDGE_TEMPLATE_NAME once one is approved, or re-run with --dry-run.",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -80,8 +82,8 @@ async def main(dry_run: bool) -> None:
             try:
                 await whatsapp.send_template(
                     profile["phone_number"],
-                    settings.whatsapp_reengagement_template_name,
-                    settings.whatsapp_reengagement_template_language,
+                    settings.whatsapp_generic_nudge_template_name,
+                    settings.whatsapp_generic_nudge_template_language,
                     [message],
                 )
                 print(f"[SENT] {profile['phone_number']}")
