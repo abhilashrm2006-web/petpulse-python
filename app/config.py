@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     google_service_account_json: str = ""
     doctor_drive_folder_id: str = ""
 
+    # Early-user feedback survey (2026-09-01, scripts/send_feedback_survey.py)
+    # response tracking -- the Google Sheet linked to the Form's Responses
+    # tab, shared Viewer with the same service account above. Empty means
+    # the admin dashboard's feedback endpoint has nothing to show yet.
+    feedback_survey_spreadsheet_id: str = ""
+
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 

@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# One-off outreach script outputs (scripts/*.py) contain real customer
+# phone numbers/PII -- never belongs in git history.
+scripts/output/

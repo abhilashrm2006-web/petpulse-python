@@ -12,12 +12,13 @@ from app.admin import routes as admin_routes
 from tests.fake_supabase import FakeSupabaseClient
 
 
-def _make_ctx(supabase):
+def _make_ctx(supabase, feedback_survey_spreadsheet_id=""):
     whatsapp = SimpleNamespace(send_text=AsyncMock())
     settings = SimpleNamespace(
         razorpay_key_id="x", razorpay_key_secret="y", razorpay_consult_fee_inr=399,
+        feedback_survey_spreadsheet_id=feedback_survey_spreadsheet_id,
     )
-    return SimpleNamespace(supabase=supabase, whatsapp=whatsapp, settings=settings, openai=SimpleNamespace())
+    return SimpleNamespace(supabase=supabase, whatsapp=whatsapp, settings=settings, openai=SimpleNamespace(), http=SimpleNamespace())
 
 
 def _fake_request(ctx):
@@ -1641,3 +1642,52 @@ async def test_onboarding_funnel_computes_avg_time_in_step_from_history():
     assert row["avg_seconds_in_step"] == 60.0
     row2 = next(r for r in result["funnel"] if r["step"] == "awaiting_pet_name")
     assert row2["avg_seconds_in_step"] == 120.0
+
+
+@pytest.mark.asyncio
+async def test_feedback_survey_unconfigured_returns_empty_shape():
+    request = _fake_request(_make_ctx(FakeSupabaseClient(), feedback_survey_spreadsheet_id=""))
+
+    result = await admin_routes.feedback_survey_responses(request)
+
+    assert result["configured"] is False
+    assert result["responses"] == []
+
+
+@pytest.mark.asyncio
+async def test_feedback_survey_parses_rows_and_detects_multiple_choice_aggregates():
+    sheet_rows = [
+        ["Timestamp", "How much did you trust Pulsy's assessment?", "If we could fix just one thing, what should it be?"],
+        ["2026-09-01 10:00:00", "Fully trusted it", "Vaccination reminders"],
+        ["2026-09-01 10:05:00", "Fully trusted it", "Faster replies"],
+        ["2026-09-01 10:10:00", "Didn't really trust it", "Pricing clarity"],
+    ]
+    request = _fake_request(_make_ctx(FakeSupabaseClient(), feedback_survey_spreadsheet_id="sheet-123"))
+
+    with patch("app.admin.routes.get_sheet_values", AsyncMock(return_value=sheet_rows)):
+        result = await admin_routes.feedback_survey_responses(request)
+
+    assert result["configured"] is True
+    assert result["total_responses"] == 3
+    trust_col = "How much did you trust Pulsy's assessment?"
+    assert result["aggregates"][trust_col] == {"Fully trusted it": 2, "Didn't really trust it": 1}
+    # Free-text column (every value distinct) must NOT be treated as multiple-choice
+    assert "If we could fix just one thing, what should it be?" not in result["aggregates"]
+    # Newest-first ordering by the Timestamp column
+    assert result["responses"][0]["Timestamp"] == "2026-09-01 10:10:00"
+
+
+@pytest.mark.asyncio
+async def test_feedback_survey_handles_short_rows_without_crashing():
+    """A respondent who skipped an optional question produces a shorter
+    row than the header -- must not raise, must render as an empty answer."""
+    sheet_rows = [
+        ["Timestamp", "Required question", "Optional question"],
+        ["2026-09-01 10:00:00", "Some answer"],
+    ]
+    request = _fake_request(_make_ctx(FakeSupabaseClient(), feedback_survey_spreadsheet_id="sheet-123"))
+
+    with patch("app.admin.routes.get_sheet_values", AsyncMock(return_value=sheet_rows)):
+        result = await admin_routes.feedback_survey_responses(request)
+
+    assert result["responses"][0]["Optional question"] == ""

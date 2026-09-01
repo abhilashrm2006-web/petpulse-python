@@ -17,6 +17,7 @@ from app.admin.intent_rating import rate_customer_intent
 from app.agent.tools.booking import cancel_session
 from app.deps import AppContext
 from app.integrations import razorpay_client
+from app.integrations.google_sheets import get_sheet_values
 from app.integrations.supabase_client import escape_or_filter_value, sign_storage_url, upload_to_storage
 
 DOCTOR_DOCUMENTS_BUCKET = "doctor-documents"
@@ -1296,6 +1297,59 @@ async def analytics_reports(request: Request, date_from: str = "", date_to: str 
         "booking_funnel": booking_funnel,
         "revenue": revenue,
         "doctor_performance": doctor_performance,
+    }
+
+
+@router.get("/feedback-survey")
+async def feedback_survey_responses(request: Request) -> dict[str, Any]:
+    """Early-user feedback survey (2026-09-01, scripts/send_feedback_survey.py)
+    response tracking -- reads live from the Google Sheet linked to the
+    Form's Responses tab (Settings.feedback_survey_spreadsheet_id), rather
+    than mirroring responses into our own DB, since Google Forms is already
+    the single source of truth and a copy would just go stale. Multiple-
+    choice columns are auto-detected (a small, repeated set of distinct
+    answers) rather than hardcoding the form's exact question wording, so
+    this keeps working if questions are edited/reordered/added later."""
+    ctx = _ctx(request)
+    if not ctx.settings.feedback_survey_spreadsheet_id:
+        return {"configured": False, "total_responses": 0, "questions": [], "responses": [], "aggregates": {}}
+
+    rows = await get_sheet_values(ctx.settings, ctx.http, ctx.settings.feedback_survey_spreadsheet_id)
+    if not rows:
+        return {"configured": True, "total_responses": 0, "questions": [], "responses": [], "aggregates": {}}
+
+    headers = rows[0]
+    data_rows = rows[1:]
+
+    responses = []
+    column_values: dict[str, list[str]] = {h: [] for h in headers}
+    for row in data_rows:
+        padded = row + [""] * (len(headers) - len(row))
+        record = dict(zip(headers, padded))
+        responses.append(record)
+        for h in headers:
+            if record.get(h):
+                column_values[h].append(record[h])
+
+    aggregates: dict[str, dict[str, int]] = {}
+    for h, values in column_values.items():
+        distinct = set(values)
+        if values and 1 < len(distinct) <= 6 and len(distinct) < len(values):
+            counts: dict[str, int] = {}
+            for v in values:
+                counts[v] = counts.get(v, 0) + 1
+            aggregates[h] = counts
+
+    timestamp_col = headers[0] if headers else None
+    if timestamp_col:
+        responses.sort(key=lambda r: r.get(timestamp_col, ""), reverse=True)
+
+    return {
+        "configured": True,
+        "total_responses": len(responses),
+        "questions": headers,
+        "responses": responses,
+        "aggregates": aggregates,
     }
 
 
