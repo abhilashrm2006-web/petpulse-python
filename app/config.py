@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # that window, since free-form text isn't reliably deliverable there.
     whatsapp_generic_nudge_template_name: str = ""
     whatsapp_generic_nudge_template_language: str = "en"
+    # One-off early-user feedback survey broadcast (see
+    # scripts/send_feedback_survey.py) -- a fully static template (no
+    # variables), submitted 2026-09-01, so this exact wording reaches every
+    # customer regardless of their 24h session-window state.
+    whatsapp_feedback_survey_template_name: str = ""
+    whatsapp_feedback_survey_template_language: str = "en"
 
     # OpenAI
     openai_api_key: str = ""
