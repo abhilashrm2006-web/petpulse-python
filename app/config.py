@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     # the admin dashboard's feedback endpoint has nothing to show yet.
     feedback_survey_spreadsheet_id: str = ""
 
+    # Per-respondent thank-you (2026-09-01, scripts/send_feedback_thankyou.py)
+    # -- the feedback FORM itself is anonymous (no name/email/phone question),
+    # so there is no automatic way to link a response back to a customer;
+    # this sends to a specific phone number the admin has identified some
+    # other way, one at a time, not a broadcast.
+    whatsapp_feedback_thankyou_template_name: str = ""
+    whatsapp_feedback_thankyou_template_language: str = "en"
+
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 
