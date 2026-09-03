@@ -131,6 +131,14 @@ class Settings(BaseSettings):
     google_service_account_json: str = ""
     doctor_drive_folder_id: str = ""
 
+    # Google Places API (New) for find_nearby_vets (2026-09) -- a plain API
+    # key (Maps Platform), not the service account above, since Places is
+    # billed/enabled per-key on the Maps Platform project, not per service
+    # account. Empty means find_nearby_vets falls back to the free OSM
+    # Overpass/Nominatim path unchanged -- this is additive, not a
+    # replacement that breaks when unset.
+    google_maps_api_key: str = ""
+
     # Early-user feedback survey (2026-09-01, scripts/send_feedback_survey.py)
     # response tracking -- the Google Sheet linked to the Form's Responses
     # tab, shared Viewer with the same service account above. Empty means

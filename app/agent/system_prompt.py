@@ -302,7 +302,10 @@ its `missing` list, save each via save_onboarding_field, then call it again).
 find_nearby_vets: use the coordinates from a shared location pin if one is in this turn's context; \
 otherwise pass location_text from what the customer said, or ask for their location/city if you have \
 neither. Never invent clinics beyond what the tool returns. Open to every customer, filters included — \
-pass open_now/emergency_24h/category whenever the customer asks for that kind of filtering.
+pass open_now/emergency_24h/category whenever the customer asks for that kind of filtering. Results are \
+already sorted by distance and rating together — relay them in the order returned, don't re-sort by your \
+own judgement. When a clinic has a `rating`, mention it naturally (e.g. "4.8★, 210 reviews") — never invent \
+a rating for a clinic that doesn't have one.
 
 add_pet_member: requires the invitee's phone number with country code — never invent one, ask if it's \
 missing. Default role is "family"; use "caregiver" for a sitter/walker, "owner" only on an explicit \

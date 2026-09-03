@@ -102,6 +102,11 @@ def test_urgent_but_not_emergency_still_offers_both_options():
     assert "offer BOTH the ₹399 vet consultation and the nearby-vet finder" in SAFETY_RULES
 
 
+def test_find_nearby_vets_rule_covers_rating_and_sort_order():
+    assert "already sorted by distance and rating together" in CUSTOMER_RULES
+    assert "never invent a rating" in CUSTOMER_RULES.lower()
+
+
 def test_multipet_brand_new_complaint_is_not_overridden_by_defaulted_active_pet():
     """Eval-caught bug (2026-09): the "defaulted active pet" rule was
     written broadly enough to override the multi-pet "ask which pet" rule

@@ -1,24 +1,26 @@
 """Ports `S50mzeVEaYXIbhk2` — Nearby Vet Finder / `find_nearby_vets` (spec
-§3.4). Live version uses Nominatim + Overpass (OSM), fixed 8km radius. Every
-customer can pass open_now/emergency_24h/category to filter results,
-computed from whatever OSM opening_hours/healthcare/name tags happen to be
-on file for that clinic -- there is no ratings/reviews field in OSM data,
-so that specific filter from the product spec has no data source without
-adding a paid Google Places API dependency, and is deliberately not
-implemented here.
+§3.4).
 
-Resilience (2026-08 root-cause fix): two real transcripts showed this tool
-failing outright mid-conversation -- once during a kidney-emergency case,
-once during a surgery-referral request -- with the raw exception text
-relayed straight to the customer as "the map service is failing" and no
-next step offered. Both Nominatim and Overpass calls now retry with
-backoff; a total Overpass failure falls back to an admin-curated
-`vet_directory_fallback` Supabase table (empty until ops seeds it with
-verified clinics -- never fabricated data); and if even that has nothing
-for the customer's city, the reply still gives a concrete next step
-instead of a dead end. Every failure that reaches the fallback/escalation
-path is logged with profile/pet context so an emergency-adjacent failure
-can be alerted on, not discovered later in an export."""
+Primary data source (2026-09): Google Places API (New) `searchNearby`, when
+Settings.google_maps_api_key is configured -- gives real ratings/review
+counts and an accurate live open-now flag, sorted by a distance+rating
+composite score. Falls back automatically to the original free OSM
+Nominatim+Overpass path (unchanged) when the key isn't configured, or when
+Places itself fails after retries -- this is additive, not a
+hard dependency swap.
+
+Resilience (2026-08 root-cause fix, still applies to the OSM fallback path):
+two real transcripts showed this tool failing outright mid-conversation --
+once during a kidney-emergency case, once during a surgery-referral
+request -- with the raw exception text relayed straight to the customer as
+"the map service is failing" and no next step offered. Both Nominatim and
+Overpass calls retry with backoff; a total Overpass failure falls back to
+an admin-curated `vet_directory_fallback` Supabase table (empty until ops
+seeds it with verified clinics -- never fabricated data); and if even that
+has nothing for the customer's city, the reply still gives a concrete next
+step instead of a dead end. Every failure that reaches the fallback/
+escalation path is logged with profile/pet context so an emergency-adjacent
+failure can be alerted on, not discovered later in an export."""
 
 import asyncio
 import logging
@@ -29,6 +31,20 @@ from app.deps import AppContext
 from app.ingestion.context import AgentContext
 
 logger = logging.getLogger(__name__)
+
+PLACES_SEARCH_NEARBY_URL = "https://places.googleapis.com/v1/places:searchNearby"
+PLACES_FIELD_MASK = (
+    "places.id,places.displayName,places.formattedAddress,places.location,places.rating,"
+    "places.userRatingCount,places.internationalPhoneNumber,places.googleMapsUri,"
+    "places.currentOpeningHours.openNow,places.regularOpeningHours.weekdayDescriptions"
+)
+# Distance still matters most at a large gap (a vet 15km away is a real
+# problem even at 4.9 stars), but a meaningfully better-rated clinic can
+# outrank a somewhat closer one -- e.g. a 4.9 vs. a 2.5-star clinic (2.4
+# stars apart) swaps ranking at roughly a 6km distance gap. Tunable if live
+# feedback says distance should matter more/less relative to rating.
+RATING_DISTANCE_KM_WEIGHT = 2.5
+DEFAULT_RATING_WHEN_UNRATED = 3.5  # neutral -- doesn't penalize a real clinic that just has no reviews yet
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 # Confirmed live 2026-08-27: a real customer hit the total-failure escalation
@@ -179,6 +195,83 @@ async def _fallback_clinics(ctx: AppContext, city: str | None) -> list[dict[str,
     ]
 
 
+def _places_is_24h(place: dict[str, Any]) -> bool:
+    descriptions = (place.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []
+    return any("24 hours" in d.lower() for d in descriptions)
+
+
+def _places_matches_category(place: dict[str, Any], category: str) -> bool:
+    haystack = f"{place.get('displayName', {}).get('text', '')} {place.get('formattedAddress', '')}".lower()
+    return category.lower() in haystack
+
+
+def _ranking_score(distance_km: float, rating: float | None) -> float:
+    """Lower is better. A clinic with no rating yet is treated as neutral
+    (DEFAULT_RATING_WHEN_UNRATED), not penalized to the bottom just for
+    lacking reviews."""
+    effective_rating = rating if rating is not None else DEFAULT_RATING_WHEN_UNRATED
+    return distance_km - (effective_rating - DEFAULT_RATING_WHEN_UNRATED) * RATING_DISTANCE_KM_WEIGHT
+
+
+async def _call_google_places(ctx: AppContext, lat: float, lon: float, api_key: str) -> list[dict[str, Any]]:
+    async def _call(attempt: int):
+        resp = await ctx.http.post(
+            PLACES_SEARCH_NEARBY_URL,
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": api_key,
+                "X-Goog-FieldMask": PLACES_FIELD_MASK,
+            },
+            json={
+                "includedTypes": ["veterinary_care"],
+                "maxResultCount": 20,
+                "locationRestriction": {"circle": {"center": {"latitude": lat, "longitude": lon}, "radius": float(RADIUS_METERS)}},
+            },
+        )
+        resp.raise_for_status()
+        return resp.json().get("places", [])
+
+    return await _with_retries(_call, what="google places searchNearby")
+
+
+def _format_places_clinics(
+    places: list[dict[str, Any]], lat: float, lon: float, *, open_now: bool | None, emergency_24h: bool | None, category: str
+) -> list[dict[str, Any]]:
+    clinics = []
+    for place in places:
+        location = place.get("location") or {}
+        p_lat, p_lon = location.get("latitude"), location.get("longitude")
+        if p_lat is None or p_lon is None:
+            continue
+        is_open_now = (place.get("currentOpeningHours") or {}).get("openNow")
+        if open_now and not is_open_now:
+            continue
+        if emergency_24h and not _places_is_24h(place):
+            continue
+        if category and not _places_matches_category(place, category):
+            continue
+        distance_km = round(_haversine_km(lat, lon, p_lat, p_lon), 2)
+        rating = place.get("rating")
+        clinics.append(
+            {
+                "name": (place.get("displayName") or {}).get("text", "Unnamed clinic"),
+                "address": place.get("formattedAddress"),
+                "phone": place.get("internationalPhoneNumber"),
+                "website": place.get("googleMapsUri"),
+                "opening_hours": "Open now" if is_open_now else ("Closed now" if is_open_now is False else None),
+                "maps_url": place.get("googleMapsUri"),
+                "distance_km": distance_km,
+                "rating": rating,
+                "rating_count": place.get("userRatingCount"),
+                "_score": _ranking_score(distance_km, rating),
+            }
+        )
+    clinics.sort(key=lambda c: c["_score"])
+    for c in clinics:
+        del c["_score"]
+    return clinics
+
+
 async def find_nearby_vets(
     ctx: AppContext,
     agent_ctx: AgentContext,
@@ -213,6 +306,26 @@ async def find_nearby_vets(
             "clinics": [],
             "message": "I don't have a location for you yet — could you share your location or tell me your city?",
         }
+
+    api_key = getattr(getattr(ctx, "settings", None), "google_maps_api_key", "") or ""
+    if api_key:
+        try:
+            places = await _call_google_places(ctx, lat, lon, api_key)
+            clinics = _format_places_clinics(places, lat, lon, open_now=open_now, emergency_24h=emergency_24h, category=category)
+            if clinics:
+                return {
+                    "success": True,
+                    "count": len(clinics[:5]),
+                    "clinics": clinics[:5],
+                    "message": "Here are the nearest vet clinics I found, sorted by distance and rating.",
+                }
+            # Places succeeded but genuinely found nothing (or everything got
+            # filtered out) -- fall through to OSM rather than treating an
+            # empty real result as a failure needing retry/fallback-directory.
+        except Exception as exc:
+            _log_tool_failure(ctx, agent_ctx, "google_places_exhausted", exc)
+            # Falls through to the OSM path below rather than escalating --
+            # Places failing doesn't mean the free path will too.
 
     query = f'[out:json][timeout:25];(node["amenity"="veterinary"](around:{RADIUS_METERS},{lat},{lon});way["amenity"="veterinary"](around:{RADIUS_METERS},{lat},{lon});relation["amenity"="veterinary"](around:{RADIUS_METERS},{lat},{lon}););out center tags;'
 

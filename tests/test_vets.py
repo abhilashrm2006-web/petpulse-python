@@ -27,12 +27,13 @@ def _ok_overpass_response():
     return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"elements": OSM_ELEMENTS})
 
 
-def _make_ctx(supabase=None, get=None, post=None):
+def _make_ctx(supabase=None, get=None, post=None, google_maps_api_key=""):
     http = SimpleNamespace(
         get=get or AsyncMock(return_value=_ok_geocode_response()),
         post=post or AsyncMock(return_value=_ok_overpass_response()),
     )
-    return SimpleNamespace(http=http, supabase=supabase or FakeSupabaseClient())
+    settings = SimpleNamespace(google_maps_api_key=google_maps_api_key)
+    return SimpleNamespace(http=http, supabase=supabase or FakeSupabaseClient(), settings=settings)
 
 
 def _make_agent_ctx(city="Bengaluru"):
@@ -143,6 +144,113 @@ async def test_total_failure_gives_a_concrete_next_step_not_a_raw_error():
     assert result["count"] == 0
     assert "map service is failing" not in result["message"]
     assert "emergency vet" in result["message"] or "team member" in result["message"]
+
+
+PLACES_RESULTS = [
+    {
+        "displayName": {"text": "Premium Pet Hospital"},
+        "formattedAddress": "MG Road, Bengaluru",
+        "location": {"latitude": 12.91, "longitude": 77.61},
+        "rating": 4.8,
+        "userRatingCount": 210,
+        "internationalPhoneNumber": "+91 80 1234 5678",
+        "googleMapsUri": "https://maps.google.com/?cid=1",
+        "currentOpeningHours": {"openNow": True},
+    },
+    {
+        "displayName": {"text": "Corner Vet Clinic"},
+        "formattedAddress": "Indiranagar, Bengaluru",
+        "location": {"latitude": 12.905, "longitude": 77.605},
+        "rating": 3.2,
+        "userRatingCount": 15,
+        "internationalPhoneNumber": "+91 80 8765 4321",
+        "googleMapsUri": "https://maps.google.com/?cid=2",
+        "currentOpeningHours": {"openNow": False},
+    },
+]
+
+
+def _ok_places_response(places=None):
+    return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"places": places if places is not None else PLACES_RESULTS})
+
+
+@pytest.mark.asyncio
+async def test_google_places_used_when_api_key_configured():
+    post = AsyncMock(return_value=_ok_places_response())
+    ctx = _make_ctx(post=post, google_maps_api_key="fake-key")
+    agent_ctx = _make_agent_ctx()
+
+    result = await find_nearby_vets(ctx, agent_ctx, location_text="Bengaluru")
+
+    assert result["success"] is True
+    assert result["count"] == 2
+    assert result["clinics"][0]["rating"] is not None
+    assert "distance and rating" in result["message"]
+    # Overpass must never be hit when Places already returned results
+    urls_called = [call.args[0] for call in post.call_args_list]
+    assert all("overpass" not in u for u in urls_called)
+
+
+@pytest.mark.asyncio
+async def test_google_places_ranks_by_distance_and_rating_composite():
+    """A much closer, lower-rated clinic can still rank behind a slightly
+    farther, meaningfully-better-rated one -- not pure nearest-first."""
+    close_but_mediocre = {
+        "displayName": {"text": "Close Clinic"},
+        "formattedAddress": "Right here",
+        "location": {"latitude": 12.9005, "longitude": 77.6005},  # ~70m away
+        "rating": 2.5,
+        "userRatingCount": 40,
+        "currentOpeningHours": {"openNow": True},
+    }
+    far_but_excellent = {
+        "displayName": {"text": "Excellent Clinic"},
+        "formattedAddress": "A bit further",
+        "location": {"latitude": 12.93, "longitude": 77.63},  # ~4.6km away
+        "rating": 4.9,
+        "userRatingCount": 500,
+        "currentOpeningHours": {"openNow": True},
+    }
+    post = AsyncMock(return_value=_ok_places_response([close_but_mediocre, far_but_excellent]))
+    ctx = _make_ctx(post=post, google_maps_api_key="fake-key")
+    agent_ctx = _make_agent_ctx()
+
+    result = await find_nearby_vets(ctx, agent_ctx, location_text="Bengaluru")
+
+    assert result["clinics"][0]["name"] == "Excellent Clinic"
+
+
+@pytest.mark.asyncio
+async def test_google_places_open_now_filter():
+    post = AsyncMock(return_value=_ok_places_response())
+    ctx = _make_ctx(post=post, google_maps_api_key="fake-key")
+    agent_ctx = _make_agent_ctx()
+
+    result = await find_nearby_vets(ctx, agent_ctx, location_text="Bengaluru", open_now=True)
+
+    assert result["count"] == 1
+    assert result["clinics"][0]["name"] == "Premium Pet Hospital"
+
+
+@pytest.mark.asyncio
+async def test_google_places_failure_falls_back_to_osm():
+    call_log = []
+
+    async def post(url, **kwargs):
+        call_log.append(url)
+        if "places.googleapis.com" in url:
+            raise Exception("places down")
+        return _ok_overpass_response()
+
+    ctx = _make_ctx(post=AsyncMock(side_effect=post), google_maps_api_key="fake-key")
+    agent_ctx = _make_agent_ctx()
+
+    result = await find_nearby_vets(ctx, agent_ctx, location_text="Bengaluru")
+
+    assert result["success"] is True
+    assert result["count"] == 2  # the OSM fixture results
+    assert any("places.googleapis.com" in u for u in call_log)
+    assert any("overpass" in u for u in call_log)
 
 
 @pytest.mark.asyncio
