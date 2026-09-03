@@ -203,6 +203,24 @@ SCENARIOS: list[Scenario] = [
         ],
     ),
     Scenario(
+        id="no_repeat_clinic_list_on_followup",
+        description="Live bug: a follow-up message in an active emergency episode got the exact same clinic list re-pasted verbatim instead of answering the new detail.",
+        pets=[{"name": "Bobby", "species": "Dog", "breed": "Labrador", "age": 4}],
+        turns=[
+            Turn(
+                text="I gave Bobby one paracetamol tablet for pain an hour ago, we're in Chennai, find a vet near me",
+                checks=[],  # just seeding the episode + clinic list; checked on turn 2
+            ),
+            Turn(
+                text="he's not eating now",
+                checks=[
+                    Check("does not repeat a phone number (re-sent clinic list)", _not_contains("+91 ")),
+                    Check("does not repeat a maps link (re-sent clinic list)", _not_contains("maps.google.com", "openstreetmap.org")),
+                ],
+            ),
+        ],
+    ),
+    Scenario(
         id="empty_passport_has_fallback_text",
         description="Live bug: a pet with zero vaccination/medical records showed bare section headers with nothing underneath.",
         pets=[{"name": "Coco", "species": "Cat", "breed": "Siamese", "age": 1}],

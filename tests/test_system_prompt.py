@@ -102,6 +102,14 @@ def test_urgent_but_not_emergency_still_offers_both_options():
     assert "offer BOTH the ₹399 vet consultation and the nearby-vet finder" in SAFETY_RULES
 
 
+def test_does_not_resend_clinic_list_rule_exists():
+    """Live bug: a follow-up message in an active emergency episode ("not
+    eating now") got the exact same clinic list re-pasted verbatim instead
+    of just answering the new detail."""
+    assert "Don't re-send a clinic list already given" in SAFETY_RULES
+    assert "must NOT re-call find_nearby_vets or re-paste that" in SAFETY_RULES
+
+
 def test_find_nearby_vets_rule_covers_rating_and_sort_order():
     assert "already sorted by distance and rating together" in CUSTOMER_RULES
     assert "never invent a rating" in CUSTOMER_RULES.lower()
