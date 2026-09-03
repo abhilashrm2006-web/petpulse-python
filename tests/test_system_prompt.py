@@ -102,6 +102,16 @@ def test_urgent_but_not_emergency_still_offers_both_options():
     assert "offer BOTH the ₹399 vet consultation and the nearby-vet finder" in SAFETY_RULES
 
 
+def test_multipet_brand_new_complaint_is_not_overridden_by_defaulted_active_pet():
+    """Eval-caught bug (2026-09): the "defaulted active pet" rule was
+    written broadly enough to override the multi-pet "ask which pet" rule
+    for a fresh, unscoped complaint on a multi-pet account -- a 2-pet
+    account got a confident answer about the wrong pet instead of a
+    clarifying question for "he's been scratching his ear.\""""
+    assert "Multi-pet account, brand-new complaint, no pet named" in SAFETY_RULES
+    assert "is NOT sufficient justification to silently pick a pet" in SAFETY_RULES
+
+
 def test_formatting_rules_calibrate_length_to_the_question():
     """Found via the same audit: replies weren't calibrated to what was
     actually asked -- a simple check-in got an over-elaborate structured
