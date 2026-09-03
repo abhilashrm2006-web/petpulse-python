@@ -5,6 +5,7 @@ Long-Term Memory`). Same table names as the live n8n system
 lost by switching backends."""
 
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -15,6 +16,15 @@ from app.integrations.openai_client import json_completion
 
 CHAT_HISTORY_TABLE = "n8n_chat_history_petpulse"
 CONTEXT_WINDOW_LENGTH = 10
+
+# Confirmed live bug (2026-09): raw chat-history turns carried no date/time
+# info at all, so the model had no way to tell a 3-week-old turn from
+# yesterday's -- contributing to old, unrelated incidents getting silently
+# blended into a fresh new complaint. A gap this large or more between one
+# turn and the next gets an explicit note, so the model can treat what
+# follows as plausibly a separate, unrelated conversation rather than a
+# same-session continuation.
+SESSION_GAP_THRESHOLD_HOURS = 12
 
 MEMORY_EXTRACT_SYSTEM_PROMPT = """From this WhatsApp conversation turn, extract any durable facts worth \
 remembering long-term about the pet or owner. Respond with strict JSON — omit any field you don't have a \
@@ -33,6 +43,22 @@ def _message_to_row(session_id: str, role: str, content: str, pet_id: str | None
     return row
 
 
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _format_gap(delta: timedelta) -> str:
+    hours = delta.total_seconds() / 3600
+    if hours < 48:
+        return f"{int(hours)}h"
+    return f"{int(hours / 24)}d"
+
+
 def load_chat_history(
     client: Client, phone_number: str, pet_id: str | None = None, window: int = CONTEXT_WINDOW_LENGTH
 ) -> list[dict[str, str]]:
@@ -45,12 +71,20 @@ def load_chat_history(
     rows = query.order("id", desc=True).limit(window).execute().data or []
     rows.reverse()
     messages = []
+    previous_ts: datetime | None = None
     for row in rows:
         msg = row.get("message", {})
         role = "assistant" if msg.get("type") == "ai" else "user"
         content = msg.get("data", {}).get("content", "")
-        if content:
-            messages.append({"role": role, "content": content})
+        if not content:
+            continue
+        current_ts = _parse_ts(row.get("created_at"))
+        if role == "user" and current_ts and previous_ts and current_ts - previous_ts >= timedelta(hours=SESSION_GAP_THRESHOLD_HOURS):
+            gap = _format_gap(current_ts - previous_ts)
+            content = f"[{gap} later, possibly a new/unrelated topic] {content}"
+        if current_ts:
+            previous_ts = current_ts
+        messages.append({"role": role, "content": content})
     return messages
 
 

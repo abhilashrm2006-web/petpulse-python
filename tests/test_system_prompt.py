@@ -230,6 +230,12 @@ def test_invalid_value_narrower_reask_rule_exists():
     assert "narrower" in CUSTOMER_RULES.lower()
 
 
+def test_cross_episode_handling_rule_forbids_blending_old_health_logs_into_a_new_report():
+    assert "Cross-episode handling" in SAFETY_RULES
+    assert "health_logs_by_pet" in SAFETY_RULES
+    assert "historical record" in SAFETY_RULES
+
+
 def test_human_support_escalation_rule_gives_a_free_path_separate_from_paid_consult():
     assert "Human-support escalation" in CUSTOMER_RULES
     assert "9742228305" in CUSTOMER_RULES
