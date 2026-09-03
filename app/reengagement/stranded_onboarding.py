@@ -63,6 +63,11 @@ def is_junk_name(name: str | None) -> bool:
         return True
     if "?" in text:
         return True
+    if "@" in text:
+        # Confirmed live (2026-09-04): full_name held an email address for
+        # at least one stranded profile -- "Hi grm679@gmail.com!" is a
+        # broken-looking greeting the same way "Hi Pipe & Hardware!" is.
+        return True
     if len(text.split()) > 3:
         return True
     return False

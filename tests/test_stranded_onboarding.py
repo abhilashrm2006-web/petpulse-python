@@ -72,6 +72,13 @@ def test_sentence_like_names_are_junk():
     assert is_junk_name("So many we have 12 dogs") is True
 
 
+def test_email_addresses_are_junk():
+    """Live data-quality bug (2026-09-04): full_name held an email address
+    for a stranded profile -- "Hi grm679@gmail.com!" is as broken-looking a
+    greeting as "Hi Pipe & Hardware!"."""
+    assert is_junk_name("grm679@gmail.com") is True
+
+
 # --- pet name resolution ----------------------------------------------------
 
 def test_real_pet_name_returns_first_non_junk():
