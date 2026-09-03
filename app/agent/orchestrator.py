@@ -51,14 +51,15 @@ VOICE_REPLIES_BUCKET = "voice-replies"
 # message, and the "why?" prompt on decline) — same class of bug as above if
 # left unsuppressed. "feedback_recorded" is deliberately NOT in this set: it
 # doesn't message anyone itself, the agent's own brief thank-you IS the reply.
-# Shown once per conversation, appended deterministically in code rather
-# than left to the LLM to remember to include (or not repeat) -- the same
-# lesson as recent_clinic_list_sent below: a static prompt instruction to
-# "only say X once" isn't reliably followed, so this is enforced here
-# instead of trusted to the model.
+# Shown once per conversation, on the first substantive AI-composed reply
+# (any advice/suggestion, not just a check_symptoms result) -- appended
+# deterministically in code rather than left to the LLM to remember to
+# include (or not repeat). Same lesson as recent_clinic_list_sent below: a
+# static prompt instruction to "only say X once" isn't reliably followed,
+# so this is enforced here instead of trusted to the model.
 AI_DISCLAIMER_TEXT = (
-    "_This is AI-generated guidance, not a vet's diagnosis — for anything serious or ongoing, "
-    "please have a vet confirm._"
+    "_This is AI-generated guidance, not professional veterinary advice — for anything serious or "
+    "ongoing, please have a vet confirm._"
 )
 
 SELF_MESSAGING_MODES = {
@@ -149,7 +150,6 @@ async def run_agent_turn(
 
     self_messaged = False
     final_text = ""
-    check_symptoms_succeeded_this_turn = False
     previous_call_signatures: frozenset[tuple[str, str]] | None = None
 
     for _ in range(ctx.settings.openai_agent_max_iterations):
@@ -195,8 +195,6 @@ async def run_agent_turn(
 
             if isinstance(result, dict) and result.get("mode") in SELF_MESSAGING_MODES:
                 self_messaged = True
-            if name == "check_symptoms" and isinstance(result, dict) and result.get("success"):
-                check_symptoms_succeeded_this_turn = True
 
             messages.append(
                 {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result, default=str)}
@@ -207,7 +205,7 @@ async def run_agent_turn(
     if self_messaged:
         final_text = ""
 
-    if final_text.strip() and check_symptoms_succeeded_this_turn and not ai_disclaimer_already_shown:
+    if role != "vet" and final_text.strip() and not ai_disclaimer_already_shown:
         final_text = f"{final_text.strip()}\n\n{AI_DISCLAIMER_TEXT}"
 
     sent_chunks: list[tuple[str, str]] = []

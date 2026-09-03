@@ -356,6 +356,64 @@ async def test_ai_disclaimer_not_repeated_once_already_shown(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ai_disclaimer_covers_any_first_reply_not_just_check_symptoms(monkeypatch):
+    """Broadened per explicit request: the disclaimer must cover ALL
+    AI-generated suggestions to a customer, not just check_symptoms
+    results -- a plain general-advice reply with no tool call at all still
+    gets it, the first time, in a fresh conversation."""
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "chat_with_tools", AsyncMock(return_value=_fake_response(
+        "A bland diet of boiled chicken and rice for a day or two is usually fine for mild tummy upset.", None
+    )))
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings, http=None, whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx()
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.7",
+        timestamp="1700000006", message_type="text", text="what can I feed Rex for an upset stomach?",
+    )
+
+    result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    assert orchestrator.AI_DISCLAIMER_TEXT in result
+
+
+@pytest.mark.asyncio
+async def test_ai_disclaimer_never_shown_to_vets(monkeypatch):
+    """The disclaimer is worded for a customer receiving pet-care
+    suggestions -- a vet on the scheduling/relay line never gets it."""
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
+    monkeypatch.setattr(orchestrator, "chat_with_tools", AsyncMock(return_value=_fake_response(
+        "You have 2 appointments today: 10am and 3pm.", None
+    )))
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: [])
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings, http=None, whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx(role="vet")
+    extracted = ExtractedMessage(
+        phone_number="919000000001", sender_name="Dr. Rao", message_id="wamid.8",
+        timestamp="1700000007", message_type="text", text="what's on my schedule today?",
+    )
+
+    result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    assert orchestrator.AI_DISCLAIMER_TEXT not in result
+
+
+@pytest.mark.asyncio
 async def test_welcome_sticker_sent_for_bare_greeting(monkeypatch):
     monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [])
     monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
@@ -616,7 +674,7 @@ async def test_voice_reply_failure_does_not_break_the_turn(monkeypatch):
 
     result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted, media_context="[Voice note analysis] namaste")
 
-    assert result == "Sure thing."
+    assert result.startswith("Sure thing.")
     ctx.whatsapp.send_reply_and_chunk.assert_awaited_once()
     ctx.whatsapp.send_audio.assert_not_awaited()
 
@@ -716,5 +774,5 @@ async def test_welcome_image_send_failure_does_not_break_the_turn(monkeypatch):
 
     result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
 
-    assert result == "Pulsy — Your Pet's Health Copilot, 24/7\nHey there!"
+    assert result.startswith("Pulsy — Your Pet's Health Copilot, 24/7\nHey there!")
     ctx.whatsapp.send_reply_and_chunk.assert_awaited_once()
