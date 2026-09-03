@@ -363,3 +363,96 @@ async def test_missing_instrumentation_tables_never_break_the_wizard():
     profile = supabase.rows("profiles")[0]
     assert profile["full_name"] == "Anudeep Reddy"
     assert profile["registration_step"] == "awaiting_pet_name"
+
+
+# --- bot-echo loop circuit breaker --------------------------------------
+
+@pytest.mark.asyncio
+async def test_repeated_identical_rejection_goes_silent_after_threshold():
+    """Live bug (2026-09-04): a business auto-responder bounced the exact
+    same canned reply back at us 187 times -- our re-prompt triggered their
+    auto-reply, which triggered our next re-prompt, forever. The 3rd
+    identical rejection in a row must not send a reply at all."""
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+    canned = "Hi, welcome to Asset Tree Homes! Our executives will contact you shortly. :)"
+
+    await handle_registration(ctx, _msg(text=canned))
+    await handle_registration(ctx, _msg(text=canned))
+    assert ctx.whatsapp.send_text.await_count == 2  # first two still get the normal re-prompt
+
+    ctx.whatsapp.send_text.reset_mock()
+    handled = await handle_registration(ctx, _msg(text=canned))
+
+    assert handled is True
+    ctx.whatsapp.send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_repeated_rejection_counter_keeps_climbing_once_tripped():
+    """Once tripped, later identical repeats stay silent too -- it's a
+    permanent breaker for that exact text, not a one-time skip."""
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+    canned = "Hi, welcome to Asset Tree Homes! Our executives will contact you shortly. :)"
+
+    for _ in range(6):
+        await handle_registration(ctx, _msg(text=canned))
+
+    ctx.whatsapp.send_text.reset_mock()
+    await handle_registration(ctx, _msg(text=canned))
+    ctx.whatsapp.send_text.assert_not_awaited()
+    assert supabase.rows("profiles")[0]["repeated_rejection_count"] == 7
+
+
+@pytest.mark.asyncio
+async def test_a_real_human_varying_their_wording_never_gets_silenced():
+    """A genuinely persistent human who keeps trying different wrong
+    answers must keep getting re-prompted -- only an IDENTICAL repeat
+    trips the breaker."""
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    await handle_registration(ctx, _msg(text="Sorry im a veterinarian"))
+    await handle_registration(ctx, _msg(text="What is this"))
+    await handle_registration(ctx, _msg(text="No Hindi language?"))
+
+    assert ctx.whatsapp.send_text.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_different_text_after_a_repeat_resets_the_streak():
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+    canned = "Hi, welcome to Asset Tree Homes!"
+
+    await handle_registration(ctx, _msg(text=canned))
+    await handle_registration(ctx, _msg(text=canned))
+    await handle_registration(ctx, _msg(text="Priya Sharma"))  # a real name, accepted -- resets streak
+
+    profile = supabase.rows("profiles")[0]
+    assert profile["repeated_rejection_count"] == 0
+    assert profile["registration_step"] == "awaiting_pet_name"
+
+
+@pytest.mark.asyncio
+async def test_missing_rejection_streak_columns_never_break_the_wizard():
+    supabase = FakeSupabaseClient(initial={"profiles": [_profile(registration_step="awaiting_customer_name")]})
+    ctx = _make_ctx(supabase)
+
+    real_table = supabase.table
+    calls = {"n": 0}
+
+    def _table(name):
+        if name == "profiles":
+            calls["n"] += 1
+            if calls["n"] == 2:  # the rejection-streak update specifically
+                raise Exception('column "repeated_rejection_count" does not exist')
+        return real_table(name)
+
+    supabase.table = _table
+
+    handled = await handle_registration(ctx, _msg(text="Sorry im a veterinarian"))
+
+    assert handled is True
+    ctx.whatsapp.send_text.assert_awaited_once()

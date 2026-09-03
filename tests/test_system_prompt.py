@@ -87,6 +87,21 @@ def test_safety_rules_forbid_a_severity_line_without_an_actual_tool_call():
     assert "check_symptoms was actually called" in SAFETY_RULES
 
 
+def test_true_emergency_leads_with_nearby_vets_not_the_paid_consult():
+    """Gap identified 2026-09: at severity>=3 the prompt offered the paid
+    ₹399 consult uniformly, including for a true emergency (severity 5) --
+    competing with the customer's actual need (a physical clinic, now) with
+    a scheduled video call. A real emergency must lead with find_nearby_vets
+    and must NOT mention the paid consult in that same reply."""
+    assert "do NOT offer or mention the ₹399 consult" in SAFETY_RULES
+    assert "call find_nearby_vets yourself in that same turn (emergency_24h=true)" in SAFETY_RULES
+
+
+def test_urgent_but_not_emergency_still_offers_both_options():
+    assert "severity 3-4 (urgent but not requires_emergency_care)" in SAFETY_RULES
+    assert "offer BOTH the ₹399 vet consultation and the nearby-vet finder" in SAFETY_RULES
+
+
 def test_formatting_rules_calibrate_length_to_the_question():
     """Found via the same audit: replies weren't calibrated to what was
     actually asked -- a simple check-in got an over-elaborate structured

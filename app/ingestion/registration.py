@@ -19,6 +19,50 @@ from app.integrations.supabase_client import get_profile_by_phone, is_unique_vio
 
 logger = logging.getLogger(__name__)
 
+# Confirmed live (2026-09-04): a business WhatsApp auto-responder ("Asset
+# Tree Homes") got caught in this wizard and bounced the exact same canned
+# reply back at us 187 times -- our re-prompt triggered their auto-reply,
+# which triggered our next re-prompt, forever. Tracks the same rejected
+# text repeating in a row (not just "N rejections", which a real, oddly
+# persistent human could also trigger) -- a real customer naturally varies
+# their wording, which resets this; a fixed auto-responder does not.
+REPEATED_REJECTION_SILENCE_THRESHOLD = 3
+
+
+def _record_rejection_and_should_silence(client, profile: dict[str, Any], raw_input: str) -> bool:
+    """Returns True once the SAME rejected input has repeated
+    REPEATED_REJECTION_SILENCE_THRESHOLD+ times in a row for this profile --
+    caller must skip sending a reply this turn to break the loop. Best-effort:
+    a failure to persist the counter must never block the actual wizard step,
+    same policy as _log_onboarding_event."""
+    last = profile.get("last_rejected_registration_input")
+    count = (profile.get("repeated_rejection_count") or 0) + 1 if raw_input == last else 1
+    try:
+        client.table("profiles").update(
+            {"last_rejected_registration_input": raw_input, "repeated_rejection_count": count}
+        ).eq("id", profile["id"]).execute()
+    except Exception:
+        logger.exception("Failed to update repeated_rejection_count for profile=%s", profile["id"])
+    profile["last_rejected_registration_input"] = raw_input
+    profile["repeated_rejection_count"] = count
+
+    if count >= REPEATED_REJECTION_SILENCE_THRESHOLD:
+        logger.warning(
+            "Registration wizard: silencing profile=%s after %d identical repeated rejections (likely a bot/auto-responder loop, not a real customer): %r",
+            profile["id"], count, raw_input,
+        )
+        return True
+    return False
+
+
+def _reset_rejection_streak(client, profile_id: str) -> None:
+    try:
+        client.table("profiles").update(
+            {"last_rejected_registration_input": None, "repeated_rejection_count": 0}
+        ).eq("id", profile_id).execute()
+    except Exception:
+        logger.exception("Failed to reset repeated_rejection_count for profile=%s", profile_id)
+
 
 def _log_step_transition(client, profile_id: str, from_step: str | None, to_step: str | None) -> None:
     """Best-effort audit trail of every registration_step change -- unlike
@@ -146,11 +190,14 @@ async def _handle_customer_name(ctx: AppContext, profile: dict[str, Any], extrac
     name = (extracted.text or "").strip()
     if not _looks_like_name(name):
         _log_onboarding_event(client, profile["id"], "awaiting_customer_name", name, accepted=False, reason="not_name_like")
+        if _record_rejection_and_should_silence(client, profile, name):
+            return True
         reply = "Sorry, I didn't quite get that -- please just type your full name (e.g. Priya Sharma)."
         await ctx.whatsapp.send_text(phone, reply)
         _log_turn(client, profile, extracted, [reply])
         return True
     _log_onboarding_event(client, profile["id"], "awaiting_customer_name", name, accepted=True)
+    _reset_rejection_streak(client, profile["id"])
     client.table("profiles").update({"full_name": name, "registration_step": "awaiting_pet_name"}).eq("id", profile["id"]).execute()
     _log_step_transition(client, profile["id"], "awaiting_customer_name", "awaiting_pet_name")
     reply = f"Nice to meet you, {name}! What's your pet's name?"
@@ -165,11 +212,14 @@ async def _handle_pet_name(ctx: AppContext, profile: dict[str, Any], extracted: 
     name = (extracted.text or "").strip()
     if not _looks_like_name(name):
         _log_onboarding_event(client, profile["id"], "awaiting_pet_name", name, accepted=False, reason="not_name_like")
+        if _record_rejection_and_should_silence(client, profile, name):
+            return True
         reply = "Sorry, I didn't quite get that -- please just type your pet's name (e.g. Bruno)."
         await ctx.whatsapp.send_text(phone, reply)
         _log_turn(client, profile, extracted, [reply])
         return True
     _log_onboarding_event(client, profile["id"], "awaiting_pet_name", name, accepted=True)
+    _reset_rejection_streak(client, profile["id"])
     pet = client.table("pets").insert({"profile_id": profile["id"], "name": name, "species": "Other"}).execute().data[0]
     try:
         client.table("pet_members").insert(
@@ -195,11 +245,14 @@ async def _handle_city(ctx: AppContext, profile: dict[str, Any], extracted: Extr
     city = (extracted.text or "").strip()
     if not city:
         _log_onboarding_event(client, profile["id"], "awaiting_city", city, accepted=False, reason="empty")
+        if _record_rejection_and_should_silence(client, profile, city):
+            return True
         reply = "Please type your city."
         await ctx.whatsapp.send_text(phone, reply)
         _log_turn(client, profile, extracted, [reply])
         return True
     _log_onboarding_event(client, profile["id"], "awaiting_city", city, accepted=True)
+    _reset_rejection_streak(client, profile["id"])
     client.table("profiles").update({"city": city, "registration_step": "completed"}).eq("id", profile["id"]).execute()
     _log_step_transition(client, profile["id"], "awaiting_city", "completed")
 
