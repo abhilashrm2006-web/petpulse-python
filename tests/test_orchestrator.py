@@ -104,7 +104,7 @@ async def test_agent_calls_the_tool_the_model_picks_then_stops(monkeypatch):
     result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
 
     assert tool_calls_made == [{"symptoms": "vomiting"}]
-    assert result == "Thanks, I've logged that — please monitor closely."
+    assert result.startswith("Thanks, I've logged that — please monitor closely.")
     ctx.whatsapp.send_reply_and_chunk.assert_awaited_once_with("919876543210", result)
 
 
@@ -306,8 +306,53 @@ async def test_customer_can_reach_check_symptoms(monkeypatch):
     result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
 
     assert tool_calls_made == [{"symptoms": "vomiting"}]
-    assert result == "🟠 Urgent (4/5) — would you like to book a vet consultation for this?"
+    assert result.startswith("🟠 Urgent (4/5) — would you like to book a vet consultation for this?")
+    assert orchestrator.AI_DISCLAIMER_TEXT in result
     ctx.whatsapp.send_reply_and_chunk.assert_awaited_once_with("919876543210", result)
+
+
+@pytest.mark.asyncio
+async def test_ai_disclaimer_not_repeated_once_already_shown(monkeypatch):
+    """Confirmed live lesson (2026-09): a static "only say this once" prompt
+    rule wasn't reliably followed for the clinic-list case, so the AI
+    disclaimer is appended deterministically in code -- and, symmetrically,
+    must NOT be appended again once chat history shows it was already sent
+    in this conversation."""
+    async def fake_tool(ctx, agent_ctx, **kwargs):
+        return {"success": True, "severity": 3, "severity_display": "🟡 Moderate (3/5)"}
+
+    monkeypatch.setattr(orchestrator, "get_tool_schemas", lambda role: [{"type": "function", "function": {"name": "check_symptoms"}}])
+    monkeypatch.setattr(orchestrator, "get_tool_fn", lambda name: fake_tool)
+    monkeypatch.setattr(orchestrator, "is_tool_allowed_for_role", lambda name, role: True)
+
+    responses = [
+        _fake_response(None, [_fake_tool_call("call-1", "check_symptoms", {"symptoms": "limping"})]),
+        _fake_response("🟡 Moderate (3/5) — keep an eye on it.", None),
+    ]
+
+    async def fake_chat_with_tools(client, settings, messages, tools):
+        return responses.pop(0)
+
+    monkeypatch.setattr(orchestrator, "chat_with_tools", fake_chat_with_tools)
+    prior_history = [{"role": "assistant", "content": f"Earlier reply.\n\n{orchestrator.AI_DISCLAIMER_TEXT}"}]
+    monkeypatch.setattr(orchestrator.memory, "load_chat_history", lambda client, phone, pet_id=None: prior_history)
+    monkeypatch.setattr(orchestrator.memory, "append_turn", lambda *a, **k: None)
+    monkeypatch.setattr(orchestrator.memory, "extract_and_update_memory", AsyncMock(return_value=None))
+
+    settings = Settings(openai_agent_max_iterations=10)
+    ctx = AppContext(
+        settings=settings, http=None, whatsapp=SimpleNamespace(send_reply_and_chunk=AsyncMock()),
+        supabase=_make_supabase_mock(), openai=MagicMock(),
+    )
+    agent_ctx = _make_agent_ctx()
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.6",
+        timestamp="1700000005", message_type="text", text="Rex is limping again",
+    )
+
+    result = await orchestrator.run_agent_turn(ctx, agent_ctx, extracted)
+
+    assert orchestrator.AI_DISCLAIMER_TEXT not in result
 
 
 @pytest.mark.asyncio

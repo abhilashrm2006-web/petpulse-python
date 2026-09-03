@@ -102,6 +102,17 @@ def test_urgent_but_not_emergency_still_offers_both_options():
     assert "offer BOTH the ₹399 vet consultation and the nearby-vet finder" in SAFETY_RULES
 
 
+def test_same_problem_vs_new_problem_classification_rule_exists():
+    """The bot must explicitly distinguish a continuation of an active
+    episode from a genuinely new, unrelated problem, rather than defaulting
+    to either -- an open emergency for one issue must never make an
+    unrelated new question read as urgent when it isn't."""
+    assert "Same problem vs. a new, unrelated one" in SAFETY_RULES
+    assert "CONTINUATION" in SAFETY_RULES
+    assert "NEW, UNRELATED PROBLEM" in SAFETY_RULES
+    assert "must never make an unrelated question" in SAFETY_RULES
+
+
 def test_does_not_resend_clinic_list_rule_exists():
     """Live bug: a follow-up message in an active emergency episode ("not
     eating now") got the exact same clinic list re-pasted verbatim instead
@@ -243,6 +254,24 @@ def test_no_location_line_when_no_pin_shared():
     context = build_turn_context(agent_ctx, extracted, media_context="", document_filing_status="")
 
     assert "Shared location pin" not in context
+
+
+def test_recent_clinic_list_sent_note_appears_when_flagged():
+    """Confirmed live: a static prompt rule alone didn't reliably stop the
+    bot from re-sending a clinic list on a follow-up -- surfacing the fact
+    explicitly as a turn-context note (same pattern as open_session/
+    pending_negotiation) is what actually needs to reach the model."""
+    agent_ctx = _make_agent_ctx()
+    extracted = ExtractedMessage(
+        phone_number="919876543210", sender_name="Jane", message_id="wamid.1",
+        timestamp="1700000000", message_type="text", text="he's not eating now",
+    )
+
+    context = build_turn_context(agent_ctx, extracted, media_context="", document_filing_status="", recent_clinic_list_sent=True)
+    assert "you already sent a nearby-vet clinic list" in context
+
+    context_without = build_turn_context(agent_ctx, extracted, media_context="", document_filing_status="")
+    assert "you already sent a nearby-vet clinic list" not in context_without
 
 
 def test_bare_yes_no_resolution_rule_covers_generic_offers_not_just_structured_flows():

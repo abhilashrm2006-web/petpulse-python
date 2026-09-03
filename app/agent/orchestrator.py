@@ -6,6 +6,7 @@ turn context (see system_prompt.build_turn_context), not a routed action."""
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -50,6 +51,16 @@ VOICE_REPLIES_BUCKET = "voice-replies"
 # message, and the "why?" prompt on decline) — same class of bug as above if
 # left unsuppressed. "feedback_recorded" is deliberately NOT in this set: it
 # doesn't message anyone itself, the agent's own brief thank-you IS the reply.
+# Shown once per conversation, appended deterministically in code rather
+# than left to the LLM to remember to include (or not repeat) -- the same
+# lesson as recent_clinic_list_sent below: a static prompt instruction to
+# "only say X once" isn't reliably followed, so this is enforced here
+# instead of trusted to the model.
+AI_DISCLAIMER_TEXT = (
+    "_This is AI-generated guidance, not a vet's diagnosis — for anything serious or ongoing, "
+    "please have a vet confirm._"
+)
+
 SELF_MESSAGING_MODES = {
     "doctor_catalogue_sent", "new_parent_guide_sent", "slot_list_sent", "booked", "rescheduled", "payment_requested",
     "prescription_delivered", "declined",
@@ -111,11 +122,25 @@ async def run_agent_turn(
 
     voice_reply_language_name = SUPPORTED_LANGUAGES.get(voice_reply_language_code) if voice_reply_language_code else None
     system_prompt = build_system_prompt(role, voice_reply_language=voice_reply_language_name)
-    turn_context = build_turn_context(agent_ctx, extracted, media_context, document_filing_status)
     # Persistent memory, scoped to the active pet for a customer so a multi-pet
     # account doesn't blend context across pets (a vet's is not pet-scoped).
     memory_pet_id = agent_ctx.active_pet["id"] if (role != "vet" and agent_ctx.active_pet) else None
     history = memory.load_chat_history(client, phone, pet_id=memory_pet_id)
+    # Confirmed live bug (2026-09): telling the model via a STATIC prompt
+    # rule not to re-send a clinic list it already gave wasn't reliably
+    # followed -- surfacing the fact explicitly as a turn-context note
+    # (same pattern as open_session/pending_negotiation below) is far more
+    # effective than expecting it to infer this from raw chat history text.
+    recent_clinic_list_sent = any(
+        m.get("role") == "assistant" and re.search(r"\+\d[\d ]{7,}\d", m.get("content") or "")
+        for m in history
+    )
+    ai_disclaimer_already_shown = any(
+        m.get("role") == "assistant" and "AI-generated guidance" in (m.get("content") or "") for m in history
+    )
+    turn_context = build_turn_context(
+        agent_ctx, extracted, media_context, document_filing_status, recent_clinic_list_sent=recent_clinic_list_sent
+    )
     tools = get_tool_schemas(role)
 
     messages: list[dict[str, Any]] = (
@@ -124,6 +149,7 @@ async def run_agent_turn(
 
     self_messaged = False
     final_text = ""
+    check_symptoms_succeeded_this_turn = False
     previous_call_signatures: frozenset[tuple[str, str]] | None = None
 
     for _ in range(ctx.settings.openai_agent_max_iterations):
@@ -169,6 +195,8 @@ async def run_agent_turn(
 
             if isinstance(result, dict) and result.get("mode") in SELF_MESSAGING_MODES:
                 self_messaged = True
+            if name == "check_symptoms" and isinstance(result, dict) and result.get("success"):
+                check_symptoms_succeeded_this_turn = True
 
             messages.append(
                 {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result, default=str)}
@@ -178,6 +206,9 @@ async def run_agent_turn(
 
     if self_messaged:
         final_text = ""
+
+    if final_text.strip() and check_symptoms_succeeded_this_turn and not ai_disclaimer_already_shown:
+        final_text = f"{final_text.strip()}\n\n{AI_DISCLAIMER_TEXT}"
 
     sent_chunks: list[tuple[str, str]] = []
     if final_text.strip():

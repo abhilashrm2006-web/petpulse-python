@@ -157,6 +157,26 @@ the customer explicitly asks for the list again, asks for different filters (e.g
 shares a new/different location. Sending the identical list twice in a few minutes reads as not listening, \
 exactly when a worried owner most needs to feel heard.
 
+Same problem vs. a new, unrelated one — decide explicitly before responding: when a new message arrives \
+about a pet that has an active/recent episode in this conversation, first work out which case you're in, \
+don't default to either one:
+(1) CONTINUATION — the new message is a plausible progression, detail, or symptom of the SAME problem \
+already being discussed (e.g. vomiting reported shortly after a poisoning/ingestion incident, "he's worse \
+now", "still won't eat" after an illness report). Treat it as the same episode: carry the existing severity/ \
+urgency forward in WORDS (re-run check_symptoms if the new detail could change the picture, but don't \
+understate it) — but do NOT re-list the clinics or re-paste the checklist you already gave; that's covered \
+above and still applies here even though the severity stays high. Reference what you already sent \
+("head to the hospitals I already sent") rather than repeating it.
+(2) NEW, UNRELATED PROBLEM — the new message has no plausible medical connection to the active episode: a \
+different symptom or topic entirely, a routine question (vaccination due dates, general care, booking), or \
+explicitly about a different pet. Treat it as a fresh assessment: do NOT carry over the old episode's \
+severity, urgency framing, or "Seriousness" line into your reply, do NOT reference the earlier incident \
+unless the customer brings it up, and call check_symptoms fresh (or no tool at all, if it's not a symptom \
+report) based ONLY on this new message. An open emergency for one pet must never make an unrelated question \
+— about the same pet or a different one — read as urgent when it isn't.
+If you're genuinely unsure which case applies, a brief clarifying question ("is this still about the same \
+thing, or something new?") beats guessing wrong in either direction.
+
 Recalling a number the customer already gave you (a dose, an amount, elapsed time, a weight): if you're not \
 certain you have it right from earlier in this conversation, ask them to confirm it again rather than \
 restating a guessed or misremembered value — restating the WRONG number back at a customer who already gave \
@@ -490,6 +510,7 @@ def build_turn_context(
     extracted: ExtractedMessage,
     media_context: str,
     document_filing_status: str,
+    recent_clinic_list_sent: bool = False,
 ) -> str:
     profile = agent_ctx.profile
     now = datetime.now(tz=IST).isoformat()
@@ -500,6 +521,15 @@ def build_turn_context(
         f"User Information: {json.dumps({'email': profile.get('email'), 'city': profile.get('city'), 'phone': profile.get('phone_number'), 'onboarding_completed': profile.get('onboarding_completed')})}",
         f"Pets On File ({len(agent_ctx.pets)}): {json.dumps(agent_ctx.pets, default=str)}",
     ]
+
+    if recent_clinic_list_sent:
+        lines.append(
+            "Note: you already sent a nearby-vet clinic list (names/phone numbers) earlier in this "
+            "conversation. Do NOT call find_nearby_vets again or repeat that list — reference it briefly "
+            '("head to the hospitals I already sent") and focus this reply on what\'s actually new, unless '
+            "the customer explicitly asks for the list again, asks for different filters, or shares a new "
+            "location."
+        )
 
     if extracted.quoted_wamid:
         if agent_ctx.quoted_message_text:

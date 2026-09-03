@@ -221,6 +221,45 @@ SCENARIOS: list[Scenario] = [
         ],
     ),
     Scenario(
+        id="new_unrelated_question_after_emergency_same_pet",
+        description="An open emergency must not make an unrelated routine question about the SAME pet read as urgent -- e.g. a vaccination-due question right after a poisoning emergency.",
+        pets=[{"name": "Bobby", "species": "Dog", "breed": "Labrador", "age": 4}],
+        turns=[
+            Turn(
+                text="I gave Bobby one paracetamol tablet for pain an hour ago, we're in Chennai, find a vet near me",
+                checks=[],
+            ),
+            Turn(
+                text="unrelated question -- when is Bobby due for his next vaccination?",
+                checks=[
+                    Check("does not carry forward emergency framing", _not_contains("seriousness", "emergency (5")),
+                    Check("does not reference the paracetamol incident", _not_contains("paracetamol")),
+                ],
+            ),
+        ],
+    ),
+    Scenario(
+        id="new_unrelated_problem_different_pet",
+        description="An open emergency for one pet must not make a mild, unrelated new symptom on a DIFFERENT pet read as urgent, or bleed the first pet's incident into the second pet's assessment.",
+        pets=[
+            {"name": "Bobby", "species": "Dog", "breed": "Labrador", "age": 4},
+            {"name": "Max", "species": "Dog", "breed": "Beagle", "age": 3},
+        ],
+        turns=[
+            Turn(
+                text="I gave Bobby one paracetamol tablet for pain an hour ago, we're in Chennai, find a vet near me",
+                checks=[],
+            ),
+            Turn(
+                text="separately, Max has a little bit of dry, flaky skin on his back, otherwise totally normal",
+                checks=[
+                    Check("does not reference Bobby or paracetamol", _not_contains("bobby", "paracetamol")),
+                    Check("does not treat mild dry skin as an emergency", _not_contains("emergency (5", "critical (5")),
+                ],
+            ),
+        ],
+    ),
+    Scenario(
         id="empty_passport_has_fallback_text",
         description="Live bug: a pet with zero vaccination/medical records showed bare section headers with nothing underneath.",
         pets=[{"name": "Coco", "species": "Cat", "breed": "Siamese", "age": 1}],
