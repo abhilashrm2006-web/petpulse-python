@@ -132,7 +132,10 @@ async def test_send_reply_and_chunk_returns_wamid_and_text_per_chunk():
         ]
     )
     client = WhatsAppClient(Settings(), fake)
-    two_paragraph_text = "First paragraph, short.\n\nSecond paragraph, also short."
+    # Two paragraphs that together exceed the chunk budget -- short
+    # paragraphs merge into one bubble now (2026-09 chunking fix), so this
+    # needs genuinely-long content to still exercise the multi-chunk path.
+    two_paragraph_text = ("First paragraph. " * 22).strip() + "\n\n" + ("Second paragraph. " * 22).strip()
 
     result = await client.send_reply_and_chunk("919000000001", two_paragraph_text)
 
